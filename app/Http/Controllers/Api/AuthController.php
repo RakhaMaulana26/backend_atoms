@@ -8,6 +8,8 @@ use App\Models\ActivityLog;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
@@ -50,6 +52,65 @@ class AuthController extends Controller
             'access_token' => $token,
             'token_type' => 'Bearer',
             'user' => $user,
+        ]);
+    }
+
+    /**
+     * POST /auth/forgot-password
+     * Request password reset - generate token and send email
+     */
+    public function forgotPassword(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|email',
+        ]);
+
+        $user = User::where('email', $request->email)->first();
+
+        if (!$user) {
+            // Return success even if user doesn't exist (security best practice)
+            return response()->json([
+                'message' => 'If your email is registered, you will receive a password reset code.'
+            ]);
+        }
+
+        // Invalidate any existing unused tokens for this user
+        AccountToken::where('user_id', $user->id)
+            ->where('is_used', false)
+            ->update(['is_used' => true]);
+
+        // Generate 6-digit code
+        $code = str_pad((string) random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+
+        // Create new token
+        $token = AccountToken::create([
+            'user_id' => $user->id,
+            'token' => $code,
+            'type' => 'activation', // Same type, auto-detected based on has_password
+            'expired_at' => now()->addHours(24),
+            'is_used' => false,
+        ]);
+
+        // Send email with code
+        try {
+            Mail::send('emails.password-reset', ['code' => $code, 'user' => $user], function ($message) use ($user) {
+                $message->to($user->email)
+                    ->subject('Password Reset Code - ATOMS');
+            });
+        } catch (\Exception $e) {
+            // Log error but don't expose to user
+            Log::error('Failed to send password reset email: ' . $e->getMessage());
+        }
+
+        ActivityLog::create([
+            'user_id' => $user->id,
+            'action' => 'request_password_reset',
+            'module' => 'auth',
+            'description' => 'Password reset code requested',
+        ]);
+
+        return response()->json([
+            'message' => 'If your email is registered, you will receive a password reset code.'
         ]);
     }
 
