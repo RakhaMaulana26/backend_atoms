@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\NotificationController;
@@ -70,5 +71,14 @@ Route::middleware('auth:sanctum')->group(function () {
         
         // Admin only: create notification
         Route::post('/create', [NotificationController::class, 'create'])->middleware('role:admin');
+    });
+
+    // =======================================
+    // ACTIVITY LOGS
+    // =======================================
+    Route::prefix('activity-logs')->group(function () {
+        Route::get('/', [ActivityLogController::class, 'index']);
+        Route::get('/recent', [ActivityLogController::class, 'recent']);
+        Route::get('/statistics', [ActivityLogController::class, 'statistics']);
     });
 });
