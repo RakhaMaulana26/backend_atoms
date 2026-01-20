@@ -4,11 +4,19 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Notification;
+use App\Services\NotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
 class NotificationController extends Controller
 {
+    protected $notificationService;
+
+    public function __construct(NotificationService $notificationService)
+    {
+        $this->notificationService = $notificationService;
+    }
+
     /**
      * GET /notifications
      */
@@ -40,5 +48,55 @@ class NotificationController extends Controller
             'message' => 'Notification marked as read',
             'data' => $notification,
         ]);
+    }
+
+    /**
+     * POST /notifications/create
+     * Example endpoint to create notification with email
+     */
+    public function create(Request $request)
+    {
+        $request->validate([
+            'user_id' => 'required|exists:users,id',
+            'title' => 'required|string|max:255',
+            'message' => 'required|string',
+            'send_email' => 'boolean',
+        ]);
+
+        $user = \App\Models\User::findOrFail($request->user_id);
+        $sendEmail = $request->get('send_email', true);
+
+        $notification = $this->notificationService->createNotification(
+            $user,
+            $request->title,
+            $request->message,
+            $sendEmail
+        );
+
+        return response()->json([
+            'message' => 'Notification created successfully',
+            'data' => $notification,
+        ], 201);
+    }
+
+    /**
+     * POST /notifications/{id}/resend-email
+     */
+    public function resendEmail($id)
+    {
+        $notification = Notification::where('user_id', Auth::id())
+            ->findOrFail($id);
+
+        $success = $this->notificationService->resendEmail($notification);
+
+        if ($success) {
+            return response()->json([
+                'message' => 'Email sent successfully',
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Failed to send email',
+        ], 500);
     }
 }

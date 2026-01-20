@@ -17,6 +17,29 @@ use Illuminate\Support\Facades\Auth;
 class RosterController extends Controller
 {
     /**
+     * GET /rosters
+     */
+    public function index(Request $request)
+    {
+        $query = RosterPeriod::with(['rosterDays'])
+            ->orderBy('year', 'desc')
+            ->orderBy('month', 'desc');
+            
+        // Optional filtering by month/year
+        if ($request->has('month')) {
+            $query->where('month', $request->month);
+        }
+        
+        if ($request->has('year')) {
+            $query->where('year', $request->year);
+        }
+        
+        $rosters = $query->get();
+        
+        return response()->json($rosters);
+    }
+
+    /**
      * POST /rosters
      */
     public function store(Request $request)
@@ -24,13 +47,6 @@ class RosterController extends Controller
         $request->validate([
             'month' => 'required|integer|between:1,12',
             'year' => 'required|integer|min:2024',
-            'days' => 'required|array',
-            'days.*.date' => 'required|date',
-            'days.*.manager_id' => 'required|exists:employees,id',
-            'days.*.shifts' => 'required|array',
-            'days.*.shifts.pagi' => 'required|array',
-            'days.*.shifts.siang' => 'required|array',
-            'days.*.shifts.malam' => 'required|array',
         ]);
 
         DB::beginTransaction();
@@ -53,41 +69,17 @@ class RosterController extends Controller
                 'status' => 'draft',
             ]);
 
-            // Get shift IDs
-            $shifts = Shift::whereIn('name', ['pagi', 'siang', 'malam'])->get()->keyBy('name');
-
-            foreach ($request->days as $dayData) {
-                // Create roster day
-                $rosterDay = RosterDay::create([
+            // Auto-generate all days for the month (no shift assignments yet)
+            $daysInMonth = cal_days_in_month(CAL_GREGORIAN, $request->month, $request->year);
+            
+            for ($day = 1; $day <= $daysInMonth; $day++) {
+                $date = sprintf('%04d-%02d-%02d', $request->year, $request->month, $day);
+                
+                // Create roster day (without manager or shift assignments)
+                RosterDay::create([
                     'roster_period_id' => $rosterPeriod->id,
-                    'work_date' => $dayData['date'],
+                    'work_date' => $date,
                 ]);
-
-                // Assign manager
-                ManagerDuty::create([
-                    'roster_day_id' => $rosterDay->id,
-                    'employee_id' => $dayData['manager_id'],
-                ]);
-
-                // Assign shifts
-                foreach ($dayData['shifts'] as $shiftName => $employeeIds) {
-                    $shift = $shifts[$shiftName] ?? null;
-                    
-                    if (!$shift) {
-                        throw new \Exception("Shift {$shiftName} not found");
-                    }
-
-                    // Validate minimum employees
-                    $this->validateShiftAssignments($shiftName, $employeeIds);
-
-                    foreach ($employeeIds as $employeeId) {
-                        ShiftAssignment::create([
-                            'roster_day_id' => $rosterDay->id,
-                            'shift_id' => $shift->id,
-                            'employee_id' => $employeeId,
-                        ]);
-                    }
-                }
             }
 
             ActivityLog::create([
@@ -95,14 +87,14 @@ class RosterController extends Controller
                 'action' => 'create',
                 'module' => 'roster',
                 'reference_id' => $rosterPeriod->id,
-                'description' => 'Created roster for ' . $request->month . '/' . $request->year,
+                'description' => 'Created roster template for ' . $request->month . '/' . $request->year,
             ]);
 
             DB::commit();
 
             return response()->json([
-                'message' => 'Roster created successfully',
-                'data' => $rosterPeriod->load('rosterDays.shiftAssignments', 'rosterDays.managerDuties'),
+                'message' => 'Roster template created successfully. You can now assign managers and shifts to each day.',
+                'data' => $rosterPeriod->load('rosterDays'),
             ], 201);
         } catch (\Exception $e) {
             DB::rollBack();
@@ -124,9 +116,7 @@ class RosterController extends Controller
             'rosterDays.managerDuties.employee.user',
         ])->findOrFail($id);
 
-        return response()->json([
-            'data' => $rosterPeriod,
-        ]);
+        return response()->json($rosterPeriod);
     }
 
     /**

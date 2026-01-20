@@ -18,6 +18,7 @@ Route::prefix('auth')->group(function () {
     
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('/logout', [AuthController::class, 'logout']);
+        Route::post('/change-password', [AuthController::class, 'changePassword']);
     });
 });
 
@@ -36,12 +37,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/users/{id}', [AdminUserController::class, 'destroy']);
         Route::post('/users/{id}/restore', [AdminUserController::class, 'restore']);
         Route::post('/users/{id}/generate-token', [AdminUserController::class, 'generateToken']);
+        Route::post('/users/{id}/send-activation-code', [AdminUserController::class, 'sendActivationCode']);
     });
 
     // =======================================
     // ROSTERING
     // =======================================
     Route::prefix('rosters')->middleware('role:admin,manager')->group(function () {
+        Route::get('/', [RosterController::class, 'index']);
         Route::post('/', [RosterController::class, 'store']);
         Route::get('/{id}', [RosterController::class, 'show']);
         Route::post('/{id}/publish', [RosterController::class, 'publish']);
@@ -63,5 +66,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('notifications')->group(function () {
         Route::get('/', [NotificationController::class, 'index']);
         Route::post('/{id}/read', [NotificationController::class, 'markAsRead']);
+        Route::post('/{id}/resend-email', [NotificationController::class, 'resendEmail']);
+        
+        // Admin only: create notification
+        Route::post('/create', [NotificationController::class, 'create'])->middleware('role:admin');
     });
 });

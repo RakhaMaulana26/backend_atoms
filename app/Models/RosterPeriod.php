@@ -15,6 +15,7 @@ class RosterPeriod extends Model
         'month',
         'year',
         'status',
+        'created_by',
     ];
 
     public function rosterDays()

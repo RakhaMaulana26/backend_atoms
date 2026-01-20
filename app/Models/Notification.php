@@ -15,12 +15,16 @@ class Notification extends Model
         'title',
         'message',
         'is_read',
+        'email_sent',
+        'email_sent_at',
     ];
 
     protected function casts(): array
     {
         return [
             'is_read' => 'boolean',
+            'email_sent' => 'boolean',
+            'email_sent_at' => 'datetime',
         ];
     }
 

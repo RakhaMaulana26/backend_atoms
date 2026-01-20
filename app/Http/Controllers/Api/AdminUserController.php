@@ -11,7 +11,11 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
+use App\Mail\ActivationCodeEmail;
 
 class AdminUserController extends Controller
 {
@@ -26,44 +30,52 @@ class AdminUserController extends Controller
      */
     public function index(Request $request)
     {
-        $query = User::with(['employee' => function($q) {
-            $q->withTrashed();
-        }])->withTrashed();
+        // Cache key based on request parameters
+        $cacheKey = 'users_list_' . md5(json_encode($request->all()));
+        
+        // Cache for 5 minutes
+        $users = Cache::remember($cacheKey, 300, function () use ($request) {
+            $query = User::with(['employee' => function($q) {
+                $q->withTrashed();
+            }])->withTrashed();
 
-        // Filter by role
-        if ($request->filled('role')) {
-            $query->where('role', $request->role);
-        }
+            // Filter by role
+            if ($request->filled('role')) {
+                $query->where('role', $request->role);
+            }
 
-        // Filter by employee_type (untuk karyawan CNS, SUPPORT, MANAGER)
-        if ($request->filled('employee_type')) {
-            $query->whereHas('employee', function($q) use ($request) {
-                $q->where('employee_type', $request->employee_type);
+            // Filter by employee_type (untuk karyawan CNS, SUPPORT, MANAGER)
+            if ($request->filled('employee_type')) {
+                $query->whereHas('employee', function($q) use ($request) {
+                    $q->where('employee_type', $request->employee_type);
+                });
+            }
+
+            // Filter by active status
+            if ($request->filled('is_active')) {
+                $query->where('is_active', $request->is_active);
+            }
+
+            // Search by name or email
+            if ($request->filled('search')) {
+                $query->where(function ($q) use ($request) {
+                    $q->where('name', 'like', '%' . $request->search . '%')
+                        ->orWhere('email', 'like', '%' . $request->search . '%');
+                });
+            }
+
+            // Order by created_at descending (newest first)
+            $query->orderBy('created_at', 'desc');
+
+            $users = $query->paginate($request->get('per_page', 15));
+
+            // Add employee_type to each user for easier frontend access
+            $users->getCollection()->transform(function ($user) {
+                $user->employee_type = $user->employee ? $user->employee->employee_type : null;
+                return $user;
             });
-        }
 
-        // Filter by active status
-        if ($request->filled('is_active')) {
-            $query->where('is_active', $request->is_active);
-        }
-
-        // Search by name or email
-        if ($request->filled('search')) {
-            $query->where(function ($q) use ($request) {
-                $q->where('name', 'like', '%' . $request->search . '%')
-                    ->orWhere('email', 'like', '%' . $request->search . '%');
-            });
-        }
-
-        // Order by created_at descending (newest first)
-        $query->orderBy('created_at', 'desc');
-
-        $users = $query->paginate($request->get('per_page', 15));
-
-        // Add employee_type to each user for easier frontend access
-        $users->getCollection()->transform(function ($user) {
-            $user->employee_type = $user->employee ? $user->employee->employee_type : null;
-            return $user;
+            return $users;
         });
 
         return response()->json($users);
@@ -109,6 +121,9 @@ class AdminUserController extends Controller
             ]);
 
             DB::commit();
+            
+            // Clear users cache
+            Cache::flush();
 
             return response()->json([
                 'message' => 'User created successfully',
@@ -167,6 +182,9 @@ class AdminUserController extends Controller
             ]);
 
             DB::commit();
+            
+            // Clear users cache
+            Cache::flush();
 
             return response()->json([
                 'message' => 'User updated successfully',
@@ -200,8 +218,9 @@ class AdminUserController extends Controller
             'module' => 'user',
             'reference_id' => $user->id,
             'description' => 'Soft deleted user: ' . $user->email,
-        ]);
-
+        ]);        
+        // Clear users cache
+        Cache::flush();
         return response()->json([
             'message' => 'User deleted successfully',
         ]);
@@ -227,6 +246,9 @@ class AdminUserController extends Controller
             'reference_id' => $user->id,
             'description' => 'Restored user: ' . $user->email,
         ]);
+        
+        // Clear users cache
+        Cache::flush();
 
         return response()->json([
             'message' => 'User restored successfully',
@@ -272,6 +294,21 @@ class AdminUserController extends Controller
             'message' => $notificationMessage,
         ]);
 
+        // Send activation code via email
+        try {
+            Mail::to($user->email)->send(
+                new ActivationCodeEmail(
+                    $token,
+                    $user->name,
+                    $hasPassword ? 'reset_password' : 'activation',
+                    $expiredAt->format('d M Y, H:i')
+                )
+            );
+            Log::info("Activation code email sent successfully to {$user->email}");
+        } catch (\Exception $e) {
+            Log::error("Failed to send activation code email to {$user->email}: " . $e->getMessage());
+        }
+
         ActivityLog::create([
             'user_id' => Auth::id(),
             'action' => 'generate_token',
@@ -281,10 +318,70 @@ class AdminUserController extends Controller
         ]);
 
         return response()->json([
-            'message' => 'Token generated successfully',
+            'message' => 'Token generated successfully and sent to user\'s email',
             'token' => $token,
             'expired_at' => $expiredAt->format('Y-m-d H:i:s'),
             'purpose' => $hasPassword ? 'reset_password' : 'activation',
         ]);
+    }
+
+    /**
+     * POST /admin/users/{id}/send-activation-code
+     * Send activation code via email (for manual sending from popup)
+     */
+    public function sendActivationCode(Request $request, $id)
+    {
+        $request->validate([
+            'token' => 'required|string',
+        ]);
+
+        $user = User::findOrFail($id);
+        $token = $request->input('token');
+
+        // Verify token exists and not expired
+        $accountToken = AccountToken::where('user_id', $user->id)
+            ->where('token', $token)
+            ->where('expired_at', '>', now())
+            ->first();
+
+        if (!$accountToken) {
+            return response()->json([
+                'message' => 'Invalid or expired token',
+            ], 400);
+        }
+
+        $hasPassword = !empty($user->password);
+        $purpose = $hasPassword ? 'reset_password' : 'activation';
+
+        try {
+            Mail::to($user->email)->send(
+                new ActivationCodeEmail(
+                    $token,
+                    $user->name,
+                    $purpose,
+                    $accountToken->expired_at->format('d M Y, H:i')
+                )
+            );
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'send_activation_code',
+                'module' => 'user',
+                'reference_id' => $user->id,
+                'description' => "Sent activation code to {$user->email}",
+            ]);
+
+            Log::info("Activation code sent successfully to {$user->email}");
+
+            return response()->json([
+                'message' => 'Activation code sent to email successfully',
+            ]);
+        } catch (\Exception $e) {
+            Log::error("Failed to send activation code to {$user->email}: " . $e->getMessage());
+            
+            return response()->json([
+                'message' => 'Failed to send email: ' . $e->getMessage(),
+            ], 500);
+        }
     }
 }
