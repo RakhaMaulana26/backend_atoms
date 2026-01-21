@@ -15,7 +15,7 @@ return new class extends Migration
             $table->string('module');
             $table->unsignedBigInteger('reference_id')->nullable();
             $table->text('description')->nullable();
-            $table->timestamp('created_at')->useCurrent();
+            $table->timestamps();
         });
     }
 

@@ -16,6 +16,9 @@ return Application::configure(basePath: dirname(__DIR__))
             'role' => \App\Http\Middleware\RoleMiddleware::class,
         ]);
         
+        // Register CORS middleware
+        $middleware->append(\App\Http\Middleware\CorsMiddleware::class);
+        
         $middleware->statefulApi();
     })
     ->withExceptions(function (Exceptions $exceptions): void {
