@@ -16,10 +16,11 @@ return Application::configure(basePath: dirname(__DIR__))
             'role' => \App\Http\Middleware\RoleMiddleware::class,
         ]);
         
-        // Register CORS middleware
-        $middleware->append(\App\Http\Middleware\CorsMiddleware::class);
+        // Register CORS middleware at the beginning to run first
+        $middleware->prepend(\App\Http\Middleware\CorsMiddleware::class);
         
-        $middleware->statefulApi();
+        // Disable default CORS handling if any
+        $middleware->remove(\Illuminate\Http\Middleware\HandleCors::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->render(function (\Symfony\Component\Routing\Exception\RouteNotFoundException $e) {

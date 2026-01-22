@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\RosterController;
 use App\Http\Controllers\Api\ShiftRequestController;
+use App\Models\User;
 use Illuminate\Support\Facades\Route;
 
 // =======================================
@@ -31,24 +32,33 @@ Route::middleware('auth:sanctum')->group(function () {
     // =======================================
     // ADMIN - USER & EMPLOYEE MANAGEMENT
     // =======================================
-    Route::prefix('admin')->middleware('role:admin')->group(function () {
+    Route::prefix('admin')->middleware('role:' . User::ROLE_ADMIN)->group(function () {
         Route::get('/users', [AdminUserController::class, 'index']);
         Route::post('/users', [AdminUserController::class, 'store']);
-        Route::put('/users/{id}', [AdminUserController::class, 'update']);
+        Route::patch('/users/{id}', [AdminUserController::class, 'update']);
         Route::delete('/users/{id}', [AdminUserController::class, 'destroy']);
         Route::post('/users/{id}/restore', [AdminUserController::class, 'restore']);
-        Route::post('/users/{id}/generate-token', [AdminUserController::class, 'generateToken']);
-        Route::post('/users/{id}/send-activation-code', [AdminUserController::class, 'sendActivationCode']);
+        Route::post('/users/{id}/generate-token', [AdminUserController::class, 'generateToken'])
+            ->middleware('throttle:3,1'); // Max 3 requests per minute
+        Route::post('/users/{id}/send-activation-code', [AdminUserController::class, 'sendActivationCode'])
+            ->middleware('throttle:1,1,send-email-{id}'); // Max 1 email per user per minute
     });
 
     // =======================================
     // ROSTERING
     // =======================================
-    Route::prefix('rosters')->middleware('role:admin,manager')->group(function () {
+    Route::prefix('rosters')->middleware('role:' . User::ROLE_ADMIN . ',' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER)->group(function () {
         Route::get('/', [RosterController::class, 'index']);
         Route::post('/', [RosterController::class, 'store']);
         Route::get('/{id}', [RosterController::class, 'show']);
+        Route::get('/{id}/validate', [RosterController::class, 'validateBeforePublish']);
         Route::post('/{id}/publish', [RosterController::class, 'publish']);
+        
+        // Roster day assignments
+        Route::get('/{roster_id}/days/{day_id}', [RosterController::class, 'showDay']);
+        Route::post('/{roster_id}/days/{day_id}/assignments', [RosterController::class, 'storeAssignments']);
+        Route::put('/{roster_id}/days/{day_id}/assignments', [RosterController::class, 'updateAssignments']);
+        Route::delete('/{roster_id}/days/{day_id}/assignments/{assignment_id}', [RosterController::class, 'deleteAssignment']);
     });
 
     // =======================================
@@ -57,7 +67,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('shift-requests')->group(function () {
         Route::post('/', [ShiftRequestController::class, 'store']);
         Route::post('/{id}/approve-target', [ShiftRequestController::class, 'approveByTarget']);
-        Route::post('/{id}/approve-manager', [ShiftRequestController::class, 'approveByManager'])->middleware('role:manager');
+        Route::post('/{id}/approve-manager', [ShiftRequestController::class, 'approveByManager'])->middleware('role:' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER);
         Route::post('/{id}/reject', [ShiftRequestController::class, 'reject']);
     });
 
@@ -69,8 +79,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{id}/read', [NotificationController::class, 'markAsRead']);
         Route::post('/{id}/resend-email', [NotificationController::class, 'resendEmail']);
         
-        // Admin only: create notification
-        Route::post('/create', [NotificationController::class, 'create'])->middleware('role:admin');
+        // Admin and managers can create notifications
+        Route::post('/create', [NotificationController::class, 'create'])->middleware('role:' . User::ROLE_ADMIN . ',' . User::ROLE_GENERAL_MANAGER);
     });
 
     // =======================================

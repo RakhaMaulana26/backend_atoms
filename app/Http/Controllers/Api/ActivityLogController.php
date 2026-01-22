@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\ActivityLog;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Cache;
 
 class ActivityLogController extends Controller
 {
@@ -66,13 +67,17 @@ class ActivityLogController extends Controller
 
     /**
      * Get recent activities (last 10)
+     * Cached for 2 minutes
      */
     public function recent(): JsonResponse
     {
-        $activities = ActivityLog::with('user:id,name,email')
-            ->orderBy('created_at', 'desc')
-            ->limit(10)
-            ->get();
+        $activities = Cache::remember('activity_logs_recent', 120, function () {
+            return ActivityLog::with('user:id,name,email')
+                ->select(['id', 'user_id', 'action', 'module', 'description', 'created_at']) // Only needed columns
+                ->orderBy('created_at', 'desc')
+                ->limit(10)
+                ->get();
+        });
 
         return response()->json([
             'success' => true,
@@ -82,28 +87,31 @@ class ActivityLogController extends Controller
 
     /**
      * Get activity statistics
+     * Cached for 5 minutes
      */
     public function statistics(): JsonResponse
     {
-        $stats = [
-            'total_activities' => ActivityLog::count(),
-            'today_activities' => ActivityLog::whereDate('created_at', today())->count(),
-            'week_activities' => ActivityLog::whereBetween('created_at', [
-                now()->startOfWeek(),
-                now()->endOfWeek()
-            ])->count(),
-            'month_activities' => ActivityLog::whereMonth('created_at', now()->month)
-                ->whereYear('created_at', now()->year)
-                ->count(),
-            'by_module' => ActivityLog::selectRaw('module, COUNT(*) as count')
-                ->groupBy('module')
-                ->pluck('count', 'module'),
-            'by_action' => ActivityLog::selectRaw('action, COUNT(*) as count')
-                ->groupBy('action')
-                ->orderBy('count', 'desc')
-                ->limit(10)
-                ->pluck('count', 'action'),
-        ];
+        $stats = Cache::remember('activity_logs_statistics', 300, function () {
+            return [
+                'total_activities' => ActivityLog::count(),
+                'today_activities' => ActivityLog::whereDate('created_at', today())->count(),
+                'week_activities' => ActivityLog::whereBetween('created_at', [
+                    now()->startOfWeek(),
+                    now()->endOfWeek()
+                ])->count(),
+                'month_activities' => ActivityLog::whereMonth('created_at', now()->month)
+                    ->whereYear('created_at', now()->year)
+                    ->count(),
+                'by_module' => ActivityLog::selectRaw('module, COUNT(*) as count')
+                    ->groupBy('module')
+                    ->pluck('count', 'module'),
+                'by_action' => ActivityLog::selectRaw('action, COUNT(*) as count')
+                    ->groupBy('action')
+                    ->orderBy('count', 'desc')
+                    ->limit(10)
+                    ->pluck('count', 'action'),
+            ];
+        });
 
         return response()->json([
             'success' => true,

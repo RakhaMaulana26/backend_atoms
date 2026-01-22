@@ -1,0 +1,438 @@
+// ATOMS - Air Traffic Operations Management System
+// Database ERD - Entity Relationship Diagram
+// Created: 2026-01-22
+// Format: DBML (Database Markup Language) for dbdiagram.io
+
+Project ATOMS {
+  database_type: 'PostgreSQL/MySQL'
+  Note: '''
+    # ATOMS - Roster & Shift Management System
+    
+    ## Core Features:
+    - User & Employee Management
+    - Monthly Roster Planning (28-31 days auto-generated)
+    - Shift Assignments (3 shifts: Morning, Evening, Night)
+    - Manager Duty Assignment
+    - Shift Change Requests
+    - Notification System
+    - Activity Audit Logs
+    
+    ## Validation Rules:
+    - Each day requires 3 shifts filled
+    - Each shift requires minimum 4 CNS + 2 Support employees
+    - Each day requires minimum 1 Manager Teknik
+    - Cannot publish incomplete roster
+  '''
+}
+
+// ====================================
+// CORE TABLES
+// ====================================
+
+Table users {
+  id bigint [pk, increment]
+  name varchar(255) [not null]
+  email varchar(255) [unique, not null]
+  role varchar(255) [not null, note: 'admin, cns, support, manager_teknik, general_manager']
+  password varchar(255) [null]
+  is_active boolean [default: true]
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: 'System users with authentication and role-based access control'
+  Indexes {
+    email [unique]
+    role
+    is_active
+  }
+}
+
+Table employees {
+  id bigint [pk, increment]
+  user_id bigint [ref: > users.id, not null]
+  employee_type varchar(255) [not null, note: 'admin, CNS, Support, Manager Teknik, General Manager']
+  is_active boolean [default: true]
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: 'Employee records linked to users with specific type classification'
+  Indexes {
+    user_id [unique]
+    employee_type
+    is_active
+  }
+}
+
+Table account_tokens {
+  id bigint [pk, increment]
+  user_id bigint [ref: > users.id, not null]
+  token varchar(255) [unique, not null]
+  type varchar(255) [not null, note: 'activation, reset_password']
+  is_used boolean [default: false]
+  expired_at timestamp [not null]
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: 'Temporary tokens for account activation and password reset'
+  Indexes {
+    token [unique]
+    user_id
+    type
+    is_used
+    expired_at
+  }
+}
+
+// ====================================
+// ROSTER MANAGEMENT TABLES
+// ====================================
+
+Table shifts {
+  id bigint [pk, increment]
+  name varchar(255) [not null, note: 'Shift 1 - Pagi, Shift 2 - Malam, Shift 3 - Full Day']
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: 'Master data for shift types (Morning, Evening, Night)'
+  Indexes {
+    name
+  }
+}
+
+Table roster_periods {
+  id bigint [pk, increment]
+  month int [not null, note: '1-12']
+  year int [not null, note: 'YYYY']
+  status varchar(255) [default: 'draft', note: 'draft, published']
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: 'Monthly roster periods (e.g., January 2025 = 31 days)'
+  Indexes {
+    (month, year) [unique, name: 'idx_roster_period_unique']
+    status
+  }
+}
+
+Table roster_days {
+  id bigint [pk, increment]
+  roster_period_id bigint [ref: > roster_periods.id, not null]
+  work_date date [not null]
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: 'Individual days within a roster period (auto-generated 28-31 days)'
+  Indexes {
+    roster_period_id
+    work_date
+  }
+}
+
+Table shift_assignments {
+  id bigint [pk, increment]
+  roster_day_id bigint [ref: > roster_days.id, not null]
+  shift_id bigint [ref: > shifts.id, not null]
+  employee_id bigint [ref: > employees.id, not null]
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: '''
+    Employee assignments to specific shifts on specific days.
+    Validation: Each shift requires minimum 4 CNS + 2 Support employees
+  '''
+  Indexes {
+    roster_day_id
+    shift_id
+    employee_id
+    (roster_day_id, shift_id, employee_id) [name: 'idx_unique_assignment']
+  }
+}
+
+Table manager_duties {
+  id bigint [pk, increment]
+  roster_day_id bigint [ref: > roster_days.id, not null]
+  employee_id bigint [ref: > employees.id, not null]
+  duty_type varchar(255) [not null, note: 'Manager Teknik, General Manager']
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: '''
+    Manager duty assignments for each day.
+    Validation: Each day requires minimum 1 Manager Teknik
+  '''
+  Indexes {
+    roster_day_id
+    employee_id
+    duty_type
+  }
+}
+
+// ====================================
+// SHIFT REQUEST TABLES
+// ====================================
+
+Table shift_requests {
+  id bigint [pk, increment]
+  requester_employee_id bigint [ref: > employees.id, not null]
+  target_employee_id bigint [ref: > employees.id, not null]
+  from_roster_day_id bigint [ref: > roster_days.id, not null]
+  to_roster_day_id bigint [ref: > roster_days.id, not null]
+  shift_id bigint [ref: > shifts.id, not null]
+  reason text [null]
+  status varchar(255) [default: 'pending', note: 'pending, approved, rejected']
+  
+  // Approval flags
+  approved_by_target boolean [default: false]
+  approved_by_from_manager boolean [default: false]
+  approved_by_to_manager boolean [default: false]
+  
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  // Audit fields
+  created_by bigint [null]
+  updated_by bigint [null]
+  deleted_by bigint [null]
+  
+  Note: '''
+    Shift swap/change requests between employees.
+    Requires approval from: target employee, from_manager, to_manager
+  '''
+  Indexes {
+    requester_employee_id
+    target_employee_id
+    from_roster_day_id
+    to_roster_day_id
+    shift_id
+    status
+  }
+}
+
+// ====================================
+// NOTIFICATION & LOGGING TABLES
+// ====================================
+
+Table notifications {
+  id bigint [pk, increment]
+  user_id bigint [ref: > users.id, not null]
+  title varchar(255) [not null]
+  message text [not null]
+  is_read boolean [default: false]
+  email_sent boolean [default: false, note: 'Added in migration 2026_01_19']
+  created_at timestamp
+  updated_at timestamp
+  deleted_at timestamp [null]
+  
+  Note: 'User notifications for roster updates, shift requests, etc.'
+  Indexes {
+    user_id
+    is_read
+    email_sent
+    created_at
+  }
+}
+
+Table activity_logs {
+  id bigint [pk, increment]
+  user_id bigint [ref: > users.id, null]
+  action varchar(255) [not null, note: 'create, update, delete, publish']
+  module varchar(255) [not null, note: 'roster, user, shift_request, notification']
+  reference_id bigint [null]
+  description text [null]
+  created_at timestamp
+  updated_at timestamp
+  
+  Note: 'Audit trail for all system operations'
+  Indexes {
+    user_id
+    action
+    module
+    reference_id
+    created_at
+  }
+}
+
+// ====================================
+// LARAVEL SYSTEM TABLES
+// ====================================
+
+Table sessions {
+  id varchar(255) [pk]
+  user_id bigint [ref: > users.id, null]
+  ip_address varchar(45) [null]
+  user_agent text [null]
+  payload longtext [not null]
+  last_activity int [not null]
+  
+  Note: 'Laravel session storage'
+  Indexes {
+    user_id
+    last_activity
+  }
+}
+
+Table personal_access_tokens {
+  id bigint [pk, increment]
+  tokenable_type varchar(255) [not null]
+  tokenable_id bigint [not null]
+  name varchar(255) [not null]
+  token varchar(64) [unique, not null]
+  abilities text [null]
+  last_used_at timestamp [null]
+  expires_at timestamp [null]
+  created_at timestamp
+  updated_at timestamp
+  
+  Note: 'Laravel Sanctum authentication tokens'
+  Indexes {
+    token [unique]
+    (tokenable_type, tokenable_id) [name: 'idx_tokenable']
+  }
+}
+
+Table cache {
+  key varchar(255) [pk]
+  value text [not null]
+  expiration int [not null]
+  
+  Note: 'Laravel cache storage'
+}
+
+Table cache_locks {
+  key varchar(255) [pk]
+  owner varchar(255) [not null]
+  expiration int [not null]
+  
+  Note: 'Laravel cache lock mechanism'
+}
+
+Table jobs {
+  id bigint [pk, increment]
+  queue varchar(255) [not null]
+  payload longtext [not null]
+  attempts tinyint [not null]
+  reserved_at int [null]
+  available_at int [not null]
+  created_at int [not null]
+  
+  Note: 'Laravel queue jobs'
+  Indexes {
+    queue
+  }
+}
+
+Table job_batches {
+  id varchar(255) [pk]
+  name varchar(255) [not null]
+  total_jobs int [not null]
+  pending_jobs int [not null]
+  failed_jobs int [not null]
+  failed_job_ids longtext [not null]
+  options text [null]
+  cancelled_at int [null]
+  created_at int [not null]
+  finished_at int [null]
+  
+  Note: 'Laravel job batches'
+}
+
+Table failed_jobs {
+  id bigint [pk, increment]
+  uuid varchar(255) [unique, not null]
+  connection text [not null]
+  queue text [not null]
+  payload longtext [not null]
+  exception longtext [not null]
+  failed_at timestamp [default: `CURRENT_TIMESTAMP`]
+  
+  Note: 'Laravel failed queue jobs'
+  Indexes {
+    uuid [unique]
+  }
+}
+
+// ====================================
+// TABLE GROUPS (for better visualization)
+// ====================================
+
+TableGroup core_auth {
+  users
+  employees
+  account_tokens
+  sessions
+  personal_access_tokens
+}
+
+TableGroup roster_management {
+  roster_periods
+  roster_days
+  shift_assignments
+  manager_duties
+  shifts
+}
+
+TableGroup shift_requests_group {
+  shift_requests
+}
+
+TableGroup notifications_logs {
+  notifications
+  activity_logs
+}
+
+TableGroup laravel_system {
+  cache
+  cache_locks
+  jobs
+  job_batches
+  failed_jobs
+}

@@ -5,8 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Notification;
 use App\Services\NotificationService;
+use App\Helpers\CacheHelper;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 
 class NotificationController extends Controller
 {
@@ -19,16 +21,28 @@ class NotificationController extends Controller
 
     /**
      * GET /notifications
+     * Cached per user for 3 minutes
      */
     public function index(Request $request)
     {
-        $query = Notification::where('user_id', Auth::id());
+        $userId = Auth::id();
+        $page = $request->get('page', 1);
+        $perPage = $request->get('per_page', 20);
+        $isRead = $request->get('is_read');
+        
+        // Cache key includes user, page, filters
+        $cacheKey = "notifications_user_{$userId}_page_{$page}_read_" . ($isRead ?? 'all');
+        
+        $notifications = Cache::remember($cacheKey, 180, function () use ($userId, $isRead, $perPage) {
+            $query = Notification::where('user_id', $userId)
+                ->select(['id', 'user_id', 'type', 'title', 'message', 'is_read', 'created_at']); // Specific columns
 
-        if ($request->has('is_read')) {
-            $query->where('is_read', $request->is_read);
-        }
+            if ($isRead !== null) {
+                $query->where('is_read', $isRead);
+            }
 
-        $notifications = $query->latest()->paginate($request->get('per_page', 20));
+            return $query->latest()->paginate($perPage);
+        });
 
         return response()->json($notifications);
     }
@@ -44,6 +58,9 @@ class NotificationController extends Controller
         $notification->is_read = true;
         $notification->save();
 
+        // Clear notification cache for this user
+        CacheHelper::clearNotificationCache(Auth::id());
+        
         return response()->json([
             'message' => 'Notification marked as read',
             'data' => $notification,
@@ -72,6 +89,9 @@ class NotificationController extends Controller
             $request->message,
             $sendEmail
         );
+
+        // Clear user's notification cache
+        CacheHelper::clearNotificationCache($request->user_id);
 
         return response()->json([
             'message' => 'Notification created successfully',

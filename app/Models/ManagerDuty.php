@@ -14,6 +14,7 @@ class ManagerDuty extends Model
     protected $fillable = [
         'roster_day_id',
         'employee_id',
+        'duty_type',
     ];
 
     public function rosterDay()

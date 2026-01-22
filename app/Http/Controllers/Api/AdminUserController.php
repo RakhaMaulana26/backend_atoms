@@ -71,7 +71,8 @@ class AdminUserController extends Controller
 
             // Add employee_type to each user for easier frontend access
             $users->getCollection()->transform(function ($user) {
-                $user->employee_type = $user->employee ? $user->employee->employee_type : null;
+                $user->employee_type = $user->employee ? 
+                    $user->employee->employee_type : null;
                 return $user;
             });
 
@@ -89,8 +90,8 @@ class AdminUserController extends Controller
         $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|email|unique:users,email',
-            'role' => 'required|in:admin,cns,support,manager,gm',
-            'employee_type' => 'required_if:role,cns,support,manager|in:CNS,SUPPORT,MANAGER',
+            'role' => 'required|in:Admin,Cns,Support,Manager Teknik,General Manager',
+            'employee_type' => 'required|in:Administrator,CNS,Support,Manager Teknik,General Manager',
             'is_active' => 'sometimes|boolean',
         ]);
 
@@ -103,14 +104,12 @@ class AdminUserController extends Controller
                 'is_active' => $request->get('is_active', true),
             ]);
 
-            // Create employee if role is not admin or gm
-            if (in_array($request->role, ['cns', 'support', 'manager'])) {
-                Employee::create([
-                    'user_id' => $user->id,
-                    'employee_type' => $request->employee_type,
-                    'is_active' => $request->get('is_active', true),
-                ]);
-            }
+            // Create employee record for all roles
+            Employee::create([
+                'user_id' => $user->id,
+                'employee_type' => $request->employee_type,
+                'is_active' => $request->get('is_active', true),
+            ]);
 
             ActivityLog::create([
                 'user_id' => Auth::id(),
@@ -139,7 +138,7 @@ class AdminUserController extends Controller
     }
 
     /**
-     * PUT /admin/users/{id}
+     * PATCH /admin/users/{id} - Partial update
      */
     public function update(Request $request, $id)
     {
@@ -148,8 +147,8 @@ class AdminUserController extends Controller
         $request->validate([
             'name' => 'sometimes|string|max:255',
             'email' => 'sometimes|email|unique:users,email,' . $id,
-            'role' => 'sometimes|in:admin,cns,support,manager,gm',
-            'employee_type' => 'required_if:role,cns,support,manager|in:CNS,SUPPORT,MANAGER',
+            'role' => 'sometimes|in:Admin,Cns,Support,Manager Teknik,General Manager',
+            'employee_type' => 'sometimes|in:Administrator,CNS,Support,Manager Teknik,General Manager',
             'is_active' => 'sometimes|boolean',
         ]);
 
@@ -157,20 +156,18 @@ class AdminUserController extends Controller
         try {
             $user->update($request->only(['name', 'email', 'role', 'is_active']));
 
-            // Update or create employee
-            if (in_array($user->role, ['cns', 'support', 'manager'])) {
-                if ($user->employee) {
-                    $user->employee->update([
-                        'employee_type' => $request->employee_type,
-                        'is_active' => $request->get('is_active', $user->is_active),
-                    ]);
-                } else {
-                    Employee::create([
-                        'user_id' => $user->id,
-                        'employee_type' => $request->employee_type,
-                        'is_active' => $request->get('is_active', true),
-                    ]);
-                }
+            // Update or create employee record for all roles
+            if ($user->employee) {
+                $user->employee->update([
+                    'employee_type' => $request->employee_type,
+                    'is_active' => $request->get('is_active', $user->is_active),
+                ]);
+            } else {
+                Employee::create([
+                    'user_id' => $user->id,
+                    'employee_type' => $request->employee_type,
+                    'is_active' => $request->get('is_active', true),
+                ]);
             }
 
             ActivityLog::create([
@@ -269,6 +266,15 @@ class AdminUserController extends Controller
         ]);
 
         $user = User::findOrFail($id);
+
+        // Check for recent token generation to prevent spam (within last 10 seconds)
+        $cacheKey = "token_generated_{$user->id}";
+        if (Cache::has($cacheKey)) {
+            return response()->json([
+                'message' => 'Token was generated recently. Please wait before generating a new one.',
+            ], 429);
+        }
+
         $hasPassword = !empty($user->password);
 
         $token = strtoupper(Str::random(3) . '-' . Str::random(6));
@@ -281,6 +287,9 @@ class AdminUserController extends Controller
             'type' => 'activation',
             'expired_at' => $expiredAt,
         ]);
+
+        // Set cache to prevent duplicate generation for 10 seconds
+        Cache::put($cacheKey, true, 10);
 
         // Notification message disesuaikan dengan kondisi user
         $notificationTitle = $hasPassword ? 'Password Reset Code' : 'Account Activation Code';
@@ -338,6 +347,29 @@ class AdminUserController extends Controller
         $user = User::findOrFail($id);
         $token = $request->input('token');
 
+        // Use database-level locking to prevent race conditions
+        $lockKey = "send_email_lock_{$user->id}_{$token}";
+        $lock = Cache::lock($lockKey, 10); // 10 second lock
+        
+        if (!$lock->get()) {
+            Log::warning("Email send already in progress for user {$user->id}");
+            return response()->json([
+                'message' => 'Email sending is already in progress. Please wait.',
+            ], 429);
+        }
+
+        try {
+            // Check for recent email send to prevent spam (within last 60 seconds)
+            $cacheKey = "email_sent_{$user->id}_{$token}";
+            Log::info("Checking cache key: {$cacheKey}");
+            
+            if (Cache::has($cacheKey)) {
+                Log::warning("Duplicate email request blocked for user {$user->id}");
+                return response()->json([
+                    'message' => 'Email was already sent recently. Please wait at least 1 minute before sending again.',
+                ], 429);
+            }
+
         // Verify token exists and not expired
         $accountToken = AccountToken::where('user_id', $user->id)
             ->where('token', $token)
@@ -363,6 +395,9 @@ class AdminUserController extends Controller
                 )
             );
 
+            // Set cache to prevent duplicate sends for 60 seconds (1 minute)
+            Cache::put($cacheKey, true, 60);
+
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => 'send_activation_code',
@@ -382,6 +417,15 @@ class AdminUserController extends Controller
             return response()->json([
                 'message' => 'Failed to send email: ' . $e->getMessage(),
             ], 500);
+        } finally {
+            // Always release the lock
+            $lock->release();
+        }
+        } catch (\Exception $lockException) {
+            Log::error("Failed to acquire lock for email sending: " . $lockException->getMessage());
+            return response()->json([
+                'message' => 'System busy, please try again later',
+            ], 503);
         }
     }
 }

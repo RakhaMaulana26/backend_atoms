@@ -1,0 +1,1179 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "ATOMS API Documentation",
+    "description": "API documentation for ATOMS (Air Traffic Operations Management System) - Roster & Shift Management System",
+    "version": "1.0.0",
+    "contact": {
+      "name": "ATOMS Development Team",
+      "email": "dev@atoms.com"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000/api",
+      "description": "Local Development Server"
+    },
+    {
+      "url": "https://api.atoms.com/api",
+      "description": "Production Server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Authentication",
+      "description": "User authentication and authorization endpoints"
+    },
+    {
+      "name": "User Management",
+      "description": "Admin user and employee management"
+    },
+    {
+      "name": "Roster Management",
+      "description": "Roster period and daily assignment management"
+    },
+    {
+      "name": "Shift Requests",
+      "description": "Employee shift swap/change requests"
+    },
+    {
+      "name": "Notifications",
+      "description": "Mailbox and notification management"
+    },
+    {
+      "name": "Activity Logs",
+      "description": "System activity and audit logs"
+    }
+  ],
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "tags": ["Authentication"],
+        "summary": "User login",
+        "description": "Authenticate user with email and password",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "example": "admin@atoms.com"
+                  },
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "example": "password123"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials"
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": ["Authentication"],
+        "summary": "User logout",
+        "description": "Revoke current access token",
+        "security": [{"bearerAuth": []}],
+        "responses": {
+          "200": {
+            "description": "Logout successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "example": "Logged out successfully"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/change-password": {
+      "post": {
+        "tags": ["Authentication"],
+        "summary": "Change password",
+        "description": "Change current user password",
+        "security": [{"bearerAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["current_password", "new_password", "new_password_confirmation"],
+                "properties": {
+                  "current_password": {
+                    "type": "string",
+                    "format": "password"
+                  },
+                  "new_password": {
+                    "type": "string",
+                    "format": "password",
+                    "minLength": 8
+                  },
+                  "new_password_confirmation": {
+                    "type": "string",
+                    "format": "password"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed successfully"
+          },
+          "400": {
+            "description": "Invalid current password"
+          }
+        }
+      }
+    },
+    "/admin/users": {
+      "get": {
+        "tags": ["User Management"],
+        "summary": "List all users",
+        "description": "Get paginated list of all users with employee details",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {"type": "integer", "default": 1}
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {"type": "integer", "default": 15}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Users retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["User Management"],
+        "summary": "Create new user",
+        "description": "Create new user with employee record (Admin only)",
+        "security": [{"bearerAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "User created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        }
+      }
+    },
+    "/admin/users/{id}": {
+      "patch": {
+        "tags": ["User Management"],
+        "summary": "Update user",
+        "description": "Update user and employee details",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "User updated successfully"
+          }
+        }
+      },
+      "delete": {
+        "tags": ["User Management"],
+        "summary": "Delete user (soft delete)",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User deleted successfully"
+          }
+        }
+      }
+    },
+    "/rosters": {
+      "get": {
+        "tags": ["Roster Management"],
+        "summary": "List all rosters",
+        "description": "Get list of all roster periods",
+        "security": [{"bearerAuth": []}],
+        "responses": {
+          "200": {
+            "description": "Rosters retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Roster Management"],
+        "summary": "Create monthly roster",
+        "description": "Create new roster for a month with auto-generated days",
+        "security": [{"bearerAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["month", "year"],
+                "properties": {
+                  "month": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                    "example": 2
+                  },
+                  "year": {
+                    "type": "integer",
+                    "minimum": 2024,
+                    "example": 2025
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Roster created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Roster already exists for this period"
+          }
+        }
+      }
+    },
+    "/rosters/{id}": {
+      "get": {
+        "tags": ["Roster Management"],
+        "summary": "Get roster details",
+        "description": "Get roster with all days and assignments",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Roster retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterDetailResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rosters/{id}/validate": {
+      "get": {
+        "tags": ["Roster Management"],
+        "summary": "Validate roster before publish",
+        "description": "Preview validation results without publishing. Checks all validation rules: 3 shifts per day, minimum 4 CNS + 2 Support per shift, minimum 1 Manager Teknik per day",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validation results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rosters/{id}/publish": {
+      "post": {
+        "tags": ["Roster Management"],
+        "summary": "Publish roster",
+        "description": "Publish roster after validation. Automatically validates before publishing. Cannot publish if validation fails.",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Roster published successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Roster already published"
+          },
+          "422": {
+            "description": "Validation failed - cannot publish incomplete roster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rosters/{roster_id}/days/{day_id}": {
+      "get": {
+        "tags": ["Roster Management"],
+        "summary": "Get roster day details",
+        "description": "Get single day with all shift assignments and manager duties",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "roster_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          },
+          {
+            "name": "day_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Day details retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterDayResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rosters/{roster_id}/days/{day_id}/assignments": {
+      "post": {
+        "tags": ["Roster Management"],
+        "summary": "Add assignments to roster day (one by one or batch)",
+        "description": "Add shift assignments without deleting existing ones. You can add assignments one by one (1 employee) or in batch (multiple employees). This endpoint does NOT replace existing assignments - it only adds new ones.\n\n**🎯 Manager Auto-Detection:** If you assign an employee with role 'Manager Teknik' or 'General Manager', the system will AUTOMATICALLY create a manager duty record. You don't need to send manager_duties anymore!\n\n**Optional:** You can still manually specify manager_duties if needed for override purposes.",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "roster_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          },
+          {
+            "name": "day_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Assignments added successfully. Returns day details with validation summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentsResponse"
+                },
+                "examples": {
+                  "single_assignment": {
+                    "summary": "Adding single employee",
+                    "value": {
+                      "message": "Added 1 assignments to roster day 2025-02-01",
+                      "data": {
+                        "id": 1,
+                        "work_date": "2025-02-01"
+                      },
+                      "validation": {
+                        "shift_1": {
+                          "shift_name": "Shift 1 - Pagi",
+                          "cns_count": 1,
+                          "support_count": 0,
+                          "valid": false,
+                          "message": "Need at least 4 CNS and 2 Support. Current: 1 CNS, 0 Support."
+                        }
+                      }
+                    }
+                  },
+                  "batch_assignment": {
+                    "summary": "Adding multiple employees",
+                    "value": {
+                      "message": "Added 7 assignments to roster day 2025-02-01",
+                      "data": {
+                        "id": 1,
+                        "work_date": "2025-02-01"
+                      },
+                      "validation": {
+                        "shift_1": {
+                          "shift_name": "Shift 1 - Pagi",
+                          "cns_count": 4,
+                          "support_count": 2,
+                          "valid": true,
+                          "message": "Valid: 4 CNS, 2 Support."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Cannot modify published roster"
+          },
+          "422": {
+            "description": "Validation error - invalid employee_id or shift_id"
+          }
+        }
+      },
+      "put": {
+        "tags": ["Roster Management"],
+        "summary": "Replace all assignments for roster day (bulk operation)",
+        "description": "Delete ALL existing assignments and create new ones. Use this when you want to completely rebuild the day's assignments. For adding one-by-one, use POST instead.",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "roster_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          },
+          {
+            "name": "day_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Assignments updated successfully"
+          }
+        }
+      }
+    },
+    "/rosters/{roster_id}/days/{day_id}/assignments/{assignment_id}": {
+      "delete": {
+        "tags": ["Roster Management"],
+        "summary": "Delete specific assignment",
+        "description": "Delete a shift assignment or manager duty",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "roster_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          },
+          {
+            "name": "day_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          },
+          {
+            "name": "assignment_id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignment deleted successfully"
+          }
+        }
+      }
+    },
+    "/shift-requests": {
+      "post": {
+        "tags": ["Shift Requests"],
+        "summary": "Create shift change request",
+        "description": "Request to swap or change shift with another employee",
+        "security": [{"bearerAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShiftRequestCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Shift request created successfully"
+          }
+        }
+      }
+    },
+    "/shift-requests/{id}/approve-target": {
+      "post": {
+        "tags": ["Shift Requests"],
+        "summary": "Target employee approves request",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request approved by target employee"
+          }
+        }
+      }
+    },
+    "/shift-requests/{id}/approve-manager": {
+      "post": {
+        "tags": ["Shift Requests"],
+        "summary": "Manager approves request",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request approved by manager"
+          }
+        }
+      }
+    },
+    "/notifications": {
+      "get": {
+        "tags": ["Notifications"],
+        "summary": "Get user notifications",
+        "description": "Get paginated list of notifications for current user",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {"type": "integer"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Notifications retrieved successfully"
+          }
+        }
+      }
+    },
+    "/activity-logs": {
+      "get": {
+        "tags": ["Activity Logs"],
+        "summary": "Get activity logs",
+        "description": "Get paginated activity logs",
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {"type": "integer"}
+          },
+          {
+            "name": "module",
+            "in": "query",
+            "schema": {"type": "string"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Activity logs retrieved successfully"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "LoginResponse": {
+        "type": "object",
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "example": "1|abcdefghijklmnopqrstuvwxyz"
+          },
+          "token_type": {
+            "type": "string",
+            "example": "Bearer"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "email": {"type": "string"},
+          "role": {
+            "type": "string",
+            "enum": ["admin", "cns", "support", "manager_teknik", "general_manager"]
+          },
+          "employee": {
+            "$ref": "#/components/schemas/Employee"
+          }
+        }
+      },
+      "Employee": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "user_id": {"type": "integer"},
+          "employee_type": {
+            "type": "string",
+            "enum": ["admin", "cns", "support", "manager_teknik", "general_manager"]
+          },
+          "is_active": {"type": "boolean"}
+        }
+      },
+      "CreateUserRequest": {
+        "type": "object",
+        "required": ["name", "email", "role", "employee_type"],
+        "properties": {
+          "name": {"type": "string", "example": "John Doe"},
+          "email": {"type": "string", "format": "email", "example": "john@example.com"},
+          "role": {
+            "type": "string",
+            "enum": ["admin", "cns", "support", "manager_teknik", "general_manager"]
+          },
+          "employee_type": {
+            "type": "string",
+            "enum": ["admin", "CNS", "Support", "Manager Teknik", "General Manager"]
+          },
+          "is_active": {"type": "boolean", "default": true}
+        }
+      },
+      "UpdateUserRequest": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "email": {"type": "string", "format": "email"},
+          "role": {"type": "string"},
+          "employee_type": {"type": "string"},
+          "is_active": {"type": "boolean"}
+        }
+      },
+      "UserListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/User"}
+          },
+          "current_page": {"type": "integer"},
+          "total": {"type": "integer"},
+          "per_page": {"type": "integer"}
+        }
+      },
+      "UserResponse": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "data": {"$ref": "#/components/schemas/User"}
+        }
+      },
+      "RosterListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/RosterPeriod"}
+          }
+        }
+      },
+      "RosterPeriod": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "month": {"type": "integer"},
+          "year": {"type": "integer"},
+          "status": {
+            "type": "string",
+            "enum": ["draft", "published"]
+          },
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "RosterResponse": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "data": {
+            "allOf": [
+              {"$ref": "#/components/schemas/RosterPeriod"},
+              {
+                "type": "object",
+                "properties": {
+                  "roster_days": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/RosterDay"}
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "RosterDetailResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "allOf": [
+              {"$ref": "#/components/schemas/RosterPeriod"},
+              {
+                "type": "object",
+                "properties": {
+                  "roster_days": {
+                    "type": "array",
+                    "items": {
+                      "allOf": [
+                        {"$ref": "#/components/schemas/RosterDay"},
+                        {
+                          "type": "object",
+                          "properties": {
+                            "shift_assignments": {
+                              "type": "array",
+                              "items": {"$ref": "#/components/schemas/ShiftAssignment"}
+                            },
+                            "manager_duties": {
+                              "type": "array",
+                              "items": {"$ref": "#/components/schemas/ManagerDuty"}
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "RosterDay": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "roster_period_id": {"type": "integer"},
+          "work_date": {"type": "string", "format": "date"},
+          "created_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "ShiftAssignment": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "roster_day_id": {"type": "integer"},
+          "employee_id": {"type": "integer"},
+          "shift_id": {"type": "integer"},
+          "employee": {"$ref": "#/components/schemas/Employee"}
+        }
+      },
+      "ManagerDuty": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "roster_day_id": {"type": "integer"},
+          "employee_id": {"type": "integer"},
+          "duty_type": {
+            "type": "string",
+            "enum": ["Manager Teknik", "General Manager"]
+          },
+          "employee": {"$ref": "#/components/schemas/Employee"}
+        }
+      },
+      "ValidationResponse": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "validation": {
+            "type": "object",
+            "properties": {
+              "is_valid": {"type": "boolean"},
+              "total_days": {"type": "integer"},
+              "valid_days": {"type": "integer"},
+              "invalid_days": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/DayValidation"}
+              },
+              "errors": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            }
+          }
+        }
+      },
+      "DayValidation": {
+        "type": "object",
+        "properties": {
+          "date": {"type": "string", "format": "date"},
+          "is_valid": {"type": "boolean"},
+          "manager_count": {"type": "integer"},
+          "errors": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "shifts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "shift_name": {"type": "string"},
+                "cns_count": {"type": "integer"},
+                "support_count": {"type": "integer"},
+                "total_count": {"type": "integer"},
+                "is_valid": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      },
+      "PublishResponse": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "data": {"$ref": "#/components/schemas/RosterPeriod"},
+          "validation": {
+            "type": "object",
+            "properties": {
+              "is_valid": {"type": "boolean"},
+              "total_days": {"type": "integer"},
+              "valid_days": {"type": "integer"}
+            }
+          }
+        }
+      },
+      "ValidationErrorResponse": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "validation": {
+            "type": "object",
+            "properties": {
+              "is_valid": {"type": "boolean"},
+              "total_days": {"type": "integer"},
+              "valid_days": {"type": "integer"},
+              "invalid_days": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/DayValidation"}
+              },
+              "errors": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            }
+          }
+        }
+      },
+      "RosterDayResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "allOf": [
+              {"$ref": "#/components/schemas/RosterDay"},
+              {
+                "type": "object",
+                "properties": {
+                  "shift_assignments": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ShiftAssignment"}
+                  },
+                  "manager_duties": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ManagerDuty"}
+                  }
+                }
+              }
+            ]
+          },
+          "validation": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "shift_name": {"type": "string"},
+                "cns_count": {"type": "integer"},
+                "support_count": {"type": "integer"},
+                "total_count": {"type": "integer"},
+                "valid": {"type": "boolean"},
+                "message": {"type": "string"}
+              }
+            }
+          }
+        }
+      },
+      "AssignmentsRequest": {
+        "type": "object",
+        "properties": {
+          "shift_assignments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["employee_id", "shift_id"],
+              "properties": {
+                "employee_id": {"type": "integer", "description": "Employee ID. If employee has role 'Manager Teknik' or 'General Manager', manager duty will be auto-created."},
+                "shift_id": {"type": "integer"}
+              }
+            },
+            "description": "Array of shift assignments. Can be 1 employee (add one by one) or multiple employees (batch add). 🎯 Manager roles are auto-detected!",
+            "examples": [
+              {
+                "summary": "Single employee",
+                "value": [
+                  {"employee_id": 1, "shift_id": 1}
+                ]
+              },
+              {
+                "summary": "Multiple employees (batch)",
+                "value": [
+                  {"employee_id": 1, "shift_id": 1},
+                  {"employee_id": 2, "shift_id": 1},
+                  {"employee_id": 3, "shift_id": 1},
+                  {"employee_id": 4, "shift_id": 1},
+                  {"employee_id": 5, "shift_id": 1},
+                  {"employee_id": 6, "shift_id": 1}
+                ]
+              }
+            ]
+          },
+          "manager_duties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["employee_id", "duty_type"],
+              "properties": {
+                "employee_id": {"type": "integer"},
+                "duty_type": {
+                  "type": "string",
+                  "enum": ["Manager Teknik", "General Manager"]
+                }
+              }
+            },
+            "description": "⚠️ OPTIONAL - System auto-detects managers from user roles. Only use this for manual override if needed.",
+            "example": [
+              {"employee_id": 7, "duty_type": "Manager Teknik"}
+            ]
+          }
+        },
+        "description": "Both shift_assignments and manager_duties are optional. 🎯 NEW: Manager duties are auto-created when you assign employees with Manager roles. You typically only need to send shift_assignments!",
+        "examples": [
+          {
+            "summary": "Simple: Just assign employees (recommended)",
+            "value": {
+              "shift_assignments": [
+                {"employee_id": 1, "shift_id": 1},
+                {"employee_id": 13, "shift_id": 1}
+              ]
+            },
+            "description": "If employee 13 is Manager Teknik, manager duty will be auto-created!"
+          },
+          {
+            "summary": "Single CNS employee",
+            "value": {
+              "shift_assignments": [
+                {"employee_id": 1, "shift_id": 1}
+              ]
+            }
+          },
+          {
+            "summary": "Manual override (advanced)",
+            "value": {
+              "shift_assignments": [
+                {"employee_id": 1, "shift_id": 1}
+              ],
+              "manager_duties": [
+                {"employee_id": 7, "duty_type": "Manager Teknik"}
+              ]
+            },
+            "description": "Only use manager_duties if you need to override auto-detection"
+          }
+        ]
+      },
+      "AssignmentsResponse": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "data": {
+            "$ref": "#/components/schemas/RosterDayResponse"
+          },
+          "validation": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "ShiftRequestCreate": {
+        "type": "object",
+        "required": ["target_employee_id", "original_shift_assignment_id", "requested_shift_assignment_id", "reason"],
+        "properties": {
+          "target_employee_id": {"type": "integer"},
+          "original_shift_assignment_id": {"type": "integer"},
+          "requested_shift_assignment_id": {"type": "integer"},
+          "reason": {"type": "string"}
+        }
+      }
+    }
+  }
+}
