@@ -23,27 +23,21 @@ class RosterController extends Controller
      */
     public function index(Request $request)
     {
-        // Cache key based on filters
-        $cacheKey = 'rosters_' . ($request->month ?? 'all') . '_' . ($request->year ?? 'all');
+        $query = RosterPeriod::query()
+            ->select(['id', 'month', 'year', 'status', 'created_at', 'updated_at'])
+            ->orderBy('year', 'desc')
+            ->orderBy('month', 'desc');
+            
+        if ($request->has('month')) {
+            $query->where('month', $request->month);
+        }
         
-        // Try to get from cache (5 minutes)
-        $rosters = Cache::remember($cacheKey, 300, function () use ($request) {
-            $query = RosterPeriod::query()
-                ->select(['id', 'month', 'year', 'status', 'created_at', 'updated_at']) // Only needed columns
-                ->orderBy('year', 'desc')
-                ->orderBy('month', 'desc');
-                
-            // Optional filtering by month/year
-            if ($request->has('month')) {
-                $query->where('month', $request->month);
-            }
-            
-            if ($request->has('year')) {
-                $query->where('year', $request->year);
-            }
-            
-            return $query->limit(12)->get(); // Max 12 months (1 year)
-        });
+        if ($request->has('year')) {
+            $query->where('year', $request->year);
+        }
+        
+        // Limit results to prevent loading too much data
+        $rosters = $query->limit(12)->get();
         
         return response()->json($rosters);
     }

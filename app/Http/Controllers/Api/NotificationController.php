@@ -21,28 +21,17 @@ class NotificationController extends Controller
 
     /**
      * GET /notifications
-     * Cached per user for 3 minutes
      */
     public function index(Request $request)
     {
-        $userId = Auth::id();
-        $page = $request->get('page', 1);
-        $perPage = $request->get('per_page', 20);
-        $isRead = $request->get('is_read');
-        
-        // Cache key includes user, page, filters
-        $cacheKey = "notifications_user_{$userId}_page_{$page}_read_" . ($isRead ?? 'all');
-        
-        $notifications = Cache::remember($cacheKey, 180, function () use ($userId, $isRead, $perPage) {
-            $query = Notification::where('user_id', $userId)
-                ->select(['id', 'user_id', 'type', 'title', 'message', 'is_read', 'created_at']); // Specific columns
+        $query = Notification::where('user_id', Auth::id())
+            ->select(['id', 'user_id', 'type', 'title', 'message', 'is_read', 'created_at']);
 
-            if ($isRead !== null) {
-                $query->where('is_read', $isRead);
-            }
+        if ($request->has('is_read')) {
+            $query->where('is_read', $request->is_read);
+        }
 
-            return $query->latest()->paginate($perPage);
-        });
+        $notifications = $query->latest()->paginate($request->get('per_page', 20));
 
         return response()->json($notifications);
     }

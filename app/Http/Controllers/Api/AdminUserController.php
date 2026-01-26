@@ -8,6 +8,7 @@ use App\Models\ActivityLog;
 use App\Models\Employee;
 use App\Models\Notification;
 use App\Models\User;
+use App\Jobs\SendActivationCodeEmail as SendActivationCodeEmailJob;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
@@ -92,6 +93,7 @@ class AdminUserController extends Controller
             'email' => 'required|email|unique:users,email',
             'role' => 'required|in:Admin,Cns,Support,Manager Teknik,General Manager',
             'employee_type' => 'required|in:Administrator,CNS,Support,Manager Teknik,General Manager',
+            'grade' => 'sometimes|integer|min:1',
             'is_active' => 'sometimes|boolean',
         ]);
 
@@ -101,6 +103,7 @@ class AdminUserController extends Controller
                 'name' => $request->name,
                 'email' => $request->email,
                 'role' => $request->role,
+                'grade' => $request->grade,
                 'is_active' => $request->get('is_active', true),
             ]);
 
@@ -121,8 +124,9 @@ class AdminUserController extends Controller
 
             DB::commit();
             
-            // Clear users cache
-            Cache::flush();
+            // Clear only users cache (more specific than flush)
+            Cache::forget('users_list_*');
+            $this->clearUsersCache();
 
             return response()->json([
                 'message' => 'User created successfully',
@@ -149,12 +153,13 @@ class AdminUserController extends Controller
             'email' => 'sometimes|email|unique:users,email,' . $id,
             'role' => 'sometimes|in:Admin,Cns,Support,Manager Teknik,General Manager',
             'employee_type' => 'sometimes|in:Administrator,CNS,Support,Manager Teknik,General Manager',
+            'grade' => 'sometimes|integer|min:1',
             'is_active' => 'sometimes|boolean',
         ]);
 
         DB::beginTransaction();
         try {
-            $user->update($request->only(['name', 'email', 'role', 'is_active']));
+            $user->update($request->only(['name', 'email', 'role', 'grade', 'is_active']));
 
             // Update or create employee record for all roles
             if ($user->employee) {
@@ -181,7 +186,7 @@ class AdminUserController extends Controller
             DB::commit();
             
             // Clear users cache
-            Cache::flush();
+            $this->clearUsersCache();
 
             return response()->json([
                 'message' => 'User updated successfully',
@@ -217,7 +222,7 @@ class AdminUserController extends Controller
             'description' => 'Soft deleted user: ' . $user->email,
         ]);        
         // Clear users cache
-        Cache::flush();
+        $this->clearUsersCache();
         return response()->json([
             'message' => 'User deleted successfully',
         ]);
@@ -244,13 +249,35 @@ class AdminUserController extends Controller
             'description' => 'Restored user: ' . $user->email,
         ]);
         
-        // Clear users cache
-        Cache::flush();
+        // Clear only users cache
+        $this->clearUsersCache();
 
         return response()->json([
             'message' => 'User restored successfully',
             'data' => $user->load('employee'),
         ]);
+    }
+
+    /**
+     * Helper method to clear users cache more efficiently
+     */
+    private function clearUsersCache()
+    {
+        // Clear all users list cache variations
+        $patterns = ['users_list_*'];
+        foreach ($patterns as $pattern) {
+            // For Redis/Memcached
+            if (config('cache.default') === 'redis') {
+                $keys = Cache::getRedis()->keys($pattern);
+                foreach ($keys as $key) {
+                    Cache::forget($key);
+                }
+            } else {
+                // For file/array cache, we need to flush (less optimal)
+                Cache::flush();
+                break;
+            }
+        }
     }
 
     /**
@@ -347,7 +374,19 @@ class AdminUserController extends Controller
         $user = User::findOrFail($id);
         $token = $request->input('token');
 
-        // Use database-level locking to prevent race conditions
+        // Check for recent email send to prevent spam (within last 60 seconds)
+        // Cache key includes user_id AND token, so different tokens can be sent immediately
+        $cacheKey = "email_sent_{$user->id}_{$token}";
+        Log::info("Checking cache key: {$cacheKey}");
+        
+        if (Cache::has($cacheKey)) {
+            Log::warning("Duplicate email request blocked for user {$user->id} with token {$token}");
+            return response()->json([
+                'message' => 'This exact activation code was already sent recently to this user. Please wait at least 1 minute before sending again.',
+            ], 429);
+        }
+
+        // Use database-level locking to prevent race conditions for the same user+token
         $lockKey = "send_email_lock_{$user->id}_{$token}";
         $lock = Cache::lock($lockKey, 10); // 10 second lock
         
@@ -359,60 +398,41 @@ class AdminUserController extends Controller
         }
 
         try {
-            // Check for recent email send to prevent spam (within last 60 seconds)
-            $cacheKey = "email_sent_{$user->id}_{$token}";
-            Log::info("Checking cache key: {$cacheKey}");
-            
-            if (Cache::has($cacheKey)) {
-                Log::warning("Duplicate email request blocked for user {$user->id}");
+            // Verify token exists and not expired
+            $accountToken = AccountToken::where('user_id', $user->id)
+                ->where('token', $token)
+                ->where('expired_at', '>', now())
+                ->first();
+
+            if (!$accountToken) {
                 return response()->json([
-                    'message' => 'Email was already sent recently. Please wait at least 1 minute before sending again.',
-                ], 429);
+                    'message' => 'Invalid or expired token',
+                ], 400);
             }
 
-        // Verify token exists and not expired
-        $accountToken = AccountToken::where('user_id', $user->id)
-            ->where('token', $token)
-            ->where('expired_at', '>', now())
-            ->first();
+            $hasPassword = !empty($user->password);
+            $purpose = $hasPassword ? 'reset_password' : 'activation';
 
-        if (!$accountToken) {
-            return response()->json([
-                'message' => 'Invalid or expired token',
-            ], 400);
-        }
-
-        $hasPassword = !empty($user->password);
-        $purpose = $hasPassword ? 'reset_password' : 'activation';
-
-        try {
-            Mail::to($user->email)->send(
-                new ActivationCodeEmail(
-                    $token,
-                    $user->name,
-                    $purpose,
-                    $accountToken->expired_at->format('d M Y, H:i')
-                )
+            // Dispatch email sending to queue for better performance
+            SendActivationCodeEmailJob::dispatch(
+                $user->id,
+                $token,
+                $purpose,
+                $accountToken->expired_at->format('d M Y, H:i'),
+                Auth::id()
             );
 
             // Set cache to prevent duplicate sends for 60 seconds (1 minute)
+            // This is specific to user_id + token combination
             Cache::put($cacheKey, true, 60);
 
-            ActivityLog::create([
-                'user_id' => Auth::id(),
-                'action' => 'send_activation_code',
-                'module' => 'user',
-                'reference_id' => $user->id,
-                'description' => "Sent activation code to {$user->email}",
-            ]);
-
-            Log::info("Activation code sent successfully to {$user->email}");
+            Log::info("Activation code email queued for {$user->email}");
 
             return response()->json([
-                'message' => 'Activation code sent to email successfully',
+                'message' => 'Activation code is being sent to email',
             ]);
         } catch (\Exception $e) {
-            Log::error("Failed to send activation code to {$user->email}: " . $e->getMessage());
+            Log::error("Failed to queue activation code email to {$user->email}: " . $e->getMessage());
             
             return response()->json([
                 'message' => 'Failed to send email: ' . $e->getMessage(),
@@ -420,12 +440,6 @@ class AdminUserController extends Controller
         } finally {
             // Always release the lock
             $lock->release();
-        }
-        } catch (\Exception $lockException) {
-            Log::error("Failed to acquire lock for email sending: " . $lockException->getMessage());
-            return response()->json([
-                'message' => 'System busy, please try again later',
-            ], 503);
         }
     }
 }

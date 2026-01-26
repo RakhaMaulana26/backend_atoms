@@ -67,17 +67,14 @@ class ActivityLogController extends Controller
 
     /**
      * Get recent activities (last 10)
-     * Cached for 2 minutes
      */
     public function recent(): JsonResponse
     {
-        $activities = Cache::remember('activity_logs_recent', 120, function () {
-            return ActivityLog::with('user:id,name,email')
-                ->select(['id', 'user_id', 'action', 'module', 'description', 'created_at']) // Only needed columns
-                ->orderBy('created_at', 'desc')
-                ->limit(10)
-                ->get();
-        });
+        $activities = ActivityLog::with('user:id,name,email')
+            ->select(['id', 'user_id', 'action', 'module', 'description', 'created_at'])
+            ->orderBy('created_at', 'desc')
+            ->limit(10)
+            ->get();
 
         return response()->json([
             'success' => true,
@@ -86,32 +83,36 @@ class ActivityLogController extends Controller
     }
 
     /**
-     * Get activity statistics
-     * Cached for 5 minutes
+     * Get activity statistics (optimized with parallel queries)
      */
     public function statistics(): JsonResponse
     {
-        $stats = Cache::remember('activity_logs_statistics', 300, function () {
-            return [
-                'total_activities' => ActivityLog::count(),
-                'today_activities' => ActivityLog::whereDate('created_at', today())->count(),
-                'week_activities' => ActivityLog::whereBetween('created_at', [
-                    now()->startOfWeek(),
-                    now()->endOfWeek()
-                ])->count(),
-                'month_activities' => ActivityLog::whereMonth('created_at', now()->month)
-                    ->whereYear('created_at', now()->year)
-                    ->count(),
-                'by_module' => ActivityLog::selectRaw('module, COUNT(*) as count')
-                    ->groupBy('module')
-                    ->pluck('count', 'module'),
-                'by_action' => ActivityLog::selectRaw('action, COUNT(*) as count')
-                    ->groupBy('action')
-                    ->orderBy('count', 'desc')
-                    ->limit(10)
-                    ->pluck('count', 'action'),
-            ];
-        });
+        // Execute all COUNT queries in parallel using DB::raw
+        $result = \DB::select("
+            SELECT 
+                COUNT(*) as total_activities,
+                COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE THEN 1 END) as today_activities,
+                COUNT(CASE WHEN created_at >= DATE_TRUNC('week', CURRENT_DATE) 
+                       AND created_at < DATE_TRUNC('week', CURRENT_DATE) + INTERVAL '1 week' THEN 1 END) as week_activities,
+                COUNT(CASE WHEN EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+                       AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE) THEN 1 END) as month_activities
+            FROM activity_logs
+        ")[0];
+
+        $stats = [
+            'total_activities' => (int) $result->total_activities,
+            'today_activities' => (int) $result->today_activities,
+            'week_activities' => (int) $result->week_activities,
+            'month_activities' => (int) $result->month_activities,
+            'by_module' => ActivityLog::selectRaw('module, COUNT(*) as count')
+                ->groupBy('module')
+                ->pluck('count', 'module'),
+            'by_action' => ActivityLog::selectRaw('action, COUNT(*) as count')
+                ->groupBy('action')
+                ->orderBy('count', 'desc')
+                ->limit(10)
+                ->pluck('count', 'action'),
+        ];
 
         return response()->json([
             'success' => true,

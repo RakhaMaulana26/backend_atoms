@@ -39,6 +39,9 @@ class AuthController extends Controller
             ], 403);
         }
 
+        // Update last login timestamp
+        $user->update(['last_login' => now()]);
+
         $token = $user->createToken('auth_token')->plainTextToken;
 
         ActivityLog::create([
