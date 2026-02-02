@@ -15,8 +15,37 @@ class RosterPeriod extends Model
         'month',
         'year',
         'status',
+        'spreadsheet_url',
+        'last_synced_at',
         'created_by',
     ];
+
+    /**
+     * Get the attributes that should be cast.
+     */
+    protected function casts(): array
+    {
+        return [
+            'month' => 'integer',
+            'year' => 'integer',
+            'last_synced_at' => 'datetime',
+        ];
+    }
+
+    /**
+     * Check if roster has linked spreadsheet
+     */
+    public function hasSpreadsheetLink(): bool
+    {
+        return !empty($this->spreadsheet_url);
+    }
+
+    /**
+     * Append snake_case relationship to JSON
+     */
+    protected $with = [];
+    
+    protected $appends = [];
 
     public function rosterDays()
     {

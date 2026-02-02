@@ -3,6 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\CreateRosterPeriodRequest;
+use App\Http\Requests\StoreRosterAssignmentsRequest;
+use App\Http\Requests\UpdateRosterAssignmentsRequest;
 use App\Models\ActivityLog;
 use App\Models\Employee;
 use App\Models\ManagerDuty;
@@ -24,7 +27,7 @@ class RosterController extends Controller
     public function index(Request $request)
     {
         $query = RosterPeriod::query()
-            ->select(['id', 'month', 'year', 'status', 'created_at', 'updated_at'])
+            ->select(['id', 'month', 'year', 'status', 'spreadsheet_url', 'last_synced_at', 'created_at', 'updated_at'])
             ->orderBy('year', 'desc')
             ->orderBy('month', 'desc');
             
@@ -45,13 +48,8 @@ class RosterController extends Controller
     /**
      * POST /rosters
      */
-    public function store(Request $request)
+    public function store(CreateRosterPeriodRequest $request)
     {
-        $request->validate([
-            'month' => 'required|integer|between:1,12',
-            'year' => 'required|integer|min:2024',
-        ]);
-
         DB::beginTransaction();
         try {
             // Check if roster period already exists
@@ -113,10 +111,18 @@ class RosterController extends Controller
 
     /**
      * GET /rosters/{id}
+     * 
+     * Returns roster with all relationships:
+     * - roster_days
+     *   - shift_assignments (with employee.user and shift)
+     *   - manager_duties (with employee.user)
      */
     public function show($id)
     {
         $rosterPeriod = RosterPeriod::with([
+            'rosterDays' => function ($query) {
+                $query->orderBy('work_date', 'asc');
+            },
             'rosterDays.shiftAssignments.employee.user',
             'rosterDays.shiftAssignments.shift',
             'rosterDays.managerDuties.employee.user',
@@ -206,37 +212,8 @@ class RosterController extends Controller
      * POST /rosters/{roster_id}/days/{day_id}/assignments
      * Assign employees to shifts and managers for a specific day
      */
-    public function storeAssignments(Request $request, $rosterId, $dayId)
+    public function storeAssignments(StoreRosterAssignmentsRequest $request, $rosterId, $dayId)
     {
-        // Check if request body is empty
-        if (empty($request->all())) {
-            return response()->json([
-                'message' => 'Request body is empty. Check your JSON syntax (remove trailing commas).',
-                'example' => [
-                    'shift_assignments' => [
-                        ['employee_id' => 1, 'shift_id' => 1]
-                    ]
-                ]
-            ], 400);
-        }
-
-        $request->validate([
-            'shift_assignments' => 'sometimes|array',
-            'shift_assignments.*.employee_id' => 'required|exists:employees,id',
-            'shift_assignments.*.shift_id' => 'required|exists:shifts,id',
-            'manager_duties' => 'sometimes|array',
-            'manager_duties.*.employee_id' => 'required|exists:employees,id',
-            'manager_duties.*.duty_type' => 'required|string|in:Manager Teknik,General Manager',
-        ]);
-
-        // Debug: Log request data
-        \Log::info('Assignment Request', [
-            'has_shift_assignments' => $request->has('shift_assignments'),
-            'shift_assignments_count' => $request->has('shift_assignments') ? count($request->shift_assignments) : 0,
-            'has_manager_duties' => $request->has('manager_duties'),
-            'request_all' => $request->all()
-        ]);
-
         DB::beginTransaction();
         try {
             // Verify roster period exists
@@ -395,17 +372,8 @@ class RosterController extends Controller
      * PUT /rosters/{roster_id}/days/{day_id}/assignments
      * Update all assignments for a day (replaces existing)
      */
-    public function updateAssignments(Request $request, $rosterId, $dayId)
+    public function updateAssignments(UpdateRosterAssignmentsRequest $request, $rosterId, $dayId)
     {
-        $request->validate([
-            'shift_assignments' => 'sometimes|array',
-            'shift_assignments.*.employee_id' => 'required|exists:employees,id',
-            'shift_assignments.*.shift_id' => 'required|exists:shifts,id',
-            'manager_duties' => 'sometimes|array',
-            'manager_duties.*.employee_id' => 'required|exists:employees,id',
-            'manager_duties.*.duty_type' => 'required|string|in:Manager Teknik,General Manager',
-        ]);
-
         DB::beginTransaction();
         try {
             // Verify roster period exists
@@ -581,7 +549,7 @@ class RosterController extends Controller
             }
             
             $summary['shift_' . $shift->id] = [
-                'shift_name' => $shift->shift_name,
+                'shift_name' => $shift->name,
                 'cns_count' => $cnsCount,
                 'support_count' => $supportCount,
                 'total_count' => $assignments->count(),
@@ -630,7 +598,7 @@ class RosterController extends Controller
             'errors' => [],
         ];
 
-        $rosterDays = $rosterPeriod->days()->with([
+        $rosterDays = $rosterPeriod->rosterDays()->with([
             'shiftAssignments.employee',
             'managerDuties.employee'
         ])->get();
@@ -685,7 +653,7 @@ class RosterController extends Controller
                 $shiftValid = $cnsCount >= 4 && $supportCount >= 2;
 
                 $shiftInfo = [
-                    'shift_name' => $shift->shift_name,
+                    'shift_name' => $shift->name,
                     'cns_count' => $cnsCount,
                     'support_count' => $supportCount,
                     'total_count' => $assignments->count(),
@@ -694,7 +662,7 @@ class RosterController extends Controller
 
                 if (!$shiftValid) {
                     $dayValidation['is_valid'] = false;
-                    $message = "Shift {$shift->shift_name}: ";
+                    $message = "Shift {$shift->name}: ";
                     
                     if ($cnsCount < 4) {
                         $message .= "Need 4 CNS (current: {$cnsCount}). ";
@@ -725,5 +693,164 @@ class RosterController extends Controller
         }
 
         return $validation;
+    }
+
+    /**
+     * PUT /rosters/{id}
+     * Update roster period (month/year) - only for draft rosters
+     */
+    public function update(Request $request, $id)
+    {
+        $request->validate([
+            'month' => 'sometimes|integer|min:1|max:12',
+            'year' => 'sometimes|integer|min:2020|max:2100',
+        ]);
+
+        $rosterPeriod = RosterPeriod::findOrFail($id);
+
+        if ($rosterPeriod->isPublished()) {
+            return response()->json([
+                'message' => 'Cannot modify published roster'
+            ], 400);
+        }
+
+        DB::beginTransaction();
+        try {
+            $newMonth = $request->input('month', $rosterPeriod->month);
+            $newYear = $request->input('year', $rosterPeriod->year);
+
+            // Check if new month/year combination already exists (excluding current)
+            if ($newMonth !== $rosterPeriod->month || $newYear !== $rosterPeriod->year) {
+                $existing = RosterPeriod::where('month', $newMonth)
+                    ->where('year', $newYear)
+                    ->where('id', '!=', $id)
+                    ->first();
+
+                if ($existing) {
+                    return response()->json([
+                        'message' => 'Roster period already exists for this month and year'
+                    ], 422);
+                }
+
+                // Update roster period
+                $rosterPeriod->month = $newMonth;
+                $rosterPeriod->year = $newYear;
+                $rosterPeriod->save();
+
+                // Update roster days dates
+                $daysInMonth = cal_days_in_month(CAL_GREGORIAN, $newMonth, $newYear);
+                $existingDays = $rosterPeriod->rosterDays()->orderBy('work_date')->get();
+                
+                // Delete extra days if new month has fewer days
+                if ($existingDays->count() > $daysInMonth) {
+                    $rosterPeriod->rosterDays()
+                        ->orderBy('work_date', 'desc')
+                        ->take($existingDays->count() - $daysInMonth)
+                        ->delete();
+                    $existingDays = $rosterPeriod->rosterDays()->orderBy('work_date')->get();
+                }
+                
+                // Update existing days
+                foreach ($existingDays as $index => $day) {
+                    $dayNum = $index + 1;
+                    $newDate = sprintf('%04d-%02d-%02d', $newYear, $newMonth, $dayNum);
+                    $day->work_date = $newDate;
+                    $day->save();
+                }
+                
+                // Add new days if new month has more days
+                for ($day = $existingDays->count() + 1; $day <= $daysInMonth; $day++) {
+                    $date = sprintf('%04d-%02d-%02d', $newYear, $newMonth, $day);
+                    RosterDay::create([
+                        'roster_period_id' => $rosterPeriod->id,
+                        'work_date' => $date,
+                    ]);
+                }
+            }
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'update',
+                'module' => 'roster',
+                'reference_id' => $rosterPeriod->id,
+                'description' => 'Updated roster period to ' . $newMonth . '/' . $newYear,
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Roster updated successfully',
+                'data' => $rosterPeriod->fresh()->load('rosterDays'),
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to update roster',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * DELETE /rosters/{id}
+     * Delete roster period and all related data
+     */
+    public function destroy($id)
+    {
+        $rosterPeriod = RosterPeriod::findOrFail($id);
+
+        if ($rosterPeriod->isPublished()) {
+            return response()->json([
+                'message' => 'Cannot delete published roster. Please unpublish first or contact administrator.'
+            ], 400);
+        }
+
+        DB::beginTransaction();
+        try {
+            $monthYear = $rosterPeriod->month . '/' . $rosterPeriod->year;
+
+            // Delete all related data (cascading should handle this, but let's be explicit)
+            // Delete shift assignments for all roster days
+            ShiftAssignment::whereIn('roster_day_id', function ($query) use ($id) {
+                $query->select('id')->from('roster_days')->where('roster_period_id', $id);
+            })->delete();
+
+            // Delete manager duties for all roster days
+            ManagerDuty::whereIn('roster_day_id', function ($query) use ($id) {
+                $query->select('id')->from('roster_days')->where('roster_period_id', $id);
+            })->delete();
+
+            // Delete all roster days
+            RosterDay::where('roster_period_id', $id)->delete();
+
+            // Delete roster period
+            $rosterPeriod->delete();
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'delete',
+                'module' => 'roster',
+                'reference_id' => $id,
+                'description' => 'Deleted roster for ' . $monthYear,
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Roster deleted successfully',
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to delete roster',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
     }
 }

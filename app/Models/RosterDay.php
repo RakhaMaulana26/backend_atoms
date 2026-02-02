@@ -19,7 +19,7 @@ class RosterDay extends Model
     protected function casts(): array
     {
         return [
-            'work_date' => 'date',
+            'work_date' => 'date:Y-m-d',
         ];
     }
 

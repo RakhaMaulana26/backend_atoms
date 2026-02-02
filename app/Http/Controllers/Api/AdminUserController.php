@@ -31,8 +31,16 @@ class AdminUserController extends Controller
      */
     public function index(Request $request)
     {
-        // Cache key based on request parameters
-        $cacheKey = 'users_list_' . md5(json_encode($request->all()));
+        // Build cache key with all filter parameters to ensure proper cache isolation
+        $cacheParams = [
+            'page' => $request->get('page', 1),
+            'per_page' => $request->get('per_page', 15),
+            'role' => $request->get('role', ''),
+            'employee_type' => $request->get('employee_type', ''),
+            'is_active' => $request->get('is_active', ''),
+            'search' => $request->get('search', ''),
+        ];
+        $cacheKey = 'users_list_' . md5(json_encode($cacheParams));
         
         // Cache for 5 minutes
         $users = Cache::remember($cacheKey, 300, function () use ($request) {
@@ -65,8 +73,29 @@ class AdminUserController extends Controller
                 });
             }
 
-            // Order by created_at descending (newest first)
-            $query->orderBy('created_at', 'desc');
+            // Order by role first (Admin, Manager Teknik, Cns, Support), then by name
+            $query->orderByRaw("
+                CASE role
+                    WHEN 'Admin' THEN 1
+                    WHEN 'General Manager' THEN 2
+                    WHEN 'Manager Teknik' THEN 3
+                    WHEN 'Cns' THEN 4
+                    WHEN 'Support' THEN 5
+                    ELSE 6
+                END
+            ")->orderBy('name', 'asc');
+
+            // If 'all' parameter is set or no pagination params, return all data without pagination
+            if ($request->get('all') === 'true' || !$request->has('page')) {
+                $users = $query->get();
+                
+                // Add employee_type to each user for easier frontend access
+                foreach ($users as $user) {
+                    $user->employee_type = $user->employee->employee_type ?? null;
+                }
+                
+                return $users;
+            }
 
             $users = $query->paginate($request->get('per_page', 15));
 
@@ -79,6 +108,14 @@ class AdminUserController extends Controller
 
             return $users;
         });
+
+        // Handle different response formats
+        if (is_array($users) || $users instanceof \Illuminate\Support\Collection) {
+            // Return all data without pagination wrapper
+            return response()->json([
+                'data' => $users
+            ]);
+        }
 
         return response()->json($users);
     }

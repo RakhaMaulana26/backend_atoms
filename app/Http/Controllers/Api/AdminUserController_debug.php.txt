@@ -1,0 +1,112 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\AccountToken;
+use App\Models\ActivityLog;
+use App\Models\Employee;
+use App\Models\Notification;
+use App\Models\User;
+use App\Jobs\SendActivationCodeEmail as SendActivationCodeEmailJob;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Str;
+use App\Mail\ActivationCodeEmail;
+
+class AdminUserController extends Controller
+{
+    /**
+     * GET /admin/users
+     * Query params:
+     * - search: search by name or email
+     * - role: filter by user role (admin, cns, support, manager, gm)
+     * - employee_type: filter by employee type (CNS, SUPPORT, MANAGER)
+     * - is_active: filter by active status
+     * - per_page: pagination limit
+     */
+    public function index(Request $request)
+    {
+        // LOG ALL REQUEST PARAMETERS FOR DEBUGGING
+        Log::info('AdminUserController@index called', [
+            'all_params' => $request->all(),
+            'query_params' => $request->query(),
+            'url' => $request->fullUrl(),
+            'method' => $request->method()
+        ]);
+
+        // Build cache key with all filter parameters to ensure proper cache isolation
+        $cacheParams = [
+            'page' => $request->get('page', 1),
+            'per_page' => $request->get('per_page', 15),
+            'role' => $request->get('role', ''),
+            'employee_type' => $request->get('employee_type', ''),
+            'is_active' => $request->get('is_active', ''),
+            'search' => $request->get('search', ''),
+        ];
+        $cacheKey = 'users_list_' . md5(json_encode($cacheParams));
+        
+        // TEMPORARILY DISABLE CACHE TO DEBUG
+        // Cache for 5 minutes
+        // $users = Cache::remember($cacheKey, 300, function () use ($request) {
+        
+        $query = User::with(['employee' => function($q) {
+            $q->withTrashed();
+        }])->withTrashed();
+
+        // Filter by role
+        if ($request->filled('role')) {
+            Log::info('Filtering by role', ['role' => $request->role]);
+            $query->where('role', $request->role);
+        }
+
+        // Filter by employee_type (untuk karyawan CNS, SUPPORT, MANAGER)
+        if ($request->filled('employee_type')) {
+            Log::info('Filtering by employee_type', ['employee_type' => $request->employee_type]);
+            $query->whereHas('employee', function($q) use ($request) {
+                $q->where('employee_type', $request->employee_type);
+            });
+        }
+
+        // Filter by active status
+        if ($request->filled('is_active')) {
+            Log::info('Filtering by is_active', ['is_active' => $request->is_active]);
+            $query->where('is_active', $request->is_active);
+        }
+
+        // Search by name or email
+        if ($request->filled('search')) {
+            Log::info('Filtering by search', ['search' => $request->search]);
+            $query->where(function ($q) use ($request) {
+                $q->where('name', 'like', '%' . $request->search . '%')
+                    ->orWhere('email', 'like', '%' . $request->search . '%');
+            });
+        }
+
+        // Order by created_at descending (newest first)
+        $query->orderBy('created_at', 'desc');
+
+        $users = $query->paginate($request->get('per_page', 15));
+        
+        Log::info('Query result', [
+            'total' => $users->total(),
+            'per_page' => $users->perPage(),
+            'current_page' => $users->currentPage()
+        ]);
+
+        // Add employee_type to each user for easier frontend access
+        $users->getCollection()->transform(function ($user) {
+            $user->employee_type = $user->employee ? 
+                $user->employee->employee_type : null;
+            return $user;
+        });
+
+        // return $users;
+        // });
+
+        return response()->json($users);
+    }

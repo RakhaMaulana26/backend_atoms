@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\RosterController;
+use App\Http\Controllers\Api\RosterImportController;
 use App\Http\Controllers\Api\ShiftRequestController;
 use App\Models\User;
 use Illuminate\Support\Facades\Route;
@@ -50,9 +51,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('rosters')->middleware('role:' . User::ROLE_ADMIN . ',' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER)->group(function () {
         Route::get('/', [RosterController::class, 'index']);
         Route::post('/', [RosterController::class, 'store']);
+        Route::post('/import', [RosterImportController::class, 'import']);
+        Route::post('/import-url', [RosterImportController::class, 'importFromUrl']);
         Route::get('/{id}', [RosterController::class, 'show']);
+        Route::put('/{id}', [RosterController::class, 'update']);
+        Route::delete('/{id}', [RosterController::class, 'destroy']);
         Route::get('/{id}/validate', [RosterController::class, 'validateBeforePublish']);
         Route::post('/{id}/publish', [RosterController::class, 'publish']);
+        Route::post('/{id}/sync', [RosterImportController::class, 'syncFromSpreadsheet']);
+        Route::post('/{id}/push', [RosterImportController::class, 'pushToSpreadsheet']);
+        Route::put('/{id}/spreadsheet-url', [RosterImportController::class, 'updateSpreadsheetUrl']);
         
         // Roster day assignments
         Route::get('/{roster_id}/days/{day_id}', [RosterController::class, 'showDay']);
