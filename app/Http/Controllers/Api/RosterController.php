@@ -126,6 +126,7 @@ class RosterController extends Controller
             'rosterDays.shiftAssignments.employee.user',
             'rosterDays.shiftAssignments.shift',
             'rosterDays.managerDuties.employee.user',
+            'rosterDays.managerDuties.shift',
         ])->findOrFail($id);
 
         return response()->json($rosterPeriod);
@@ -202,6 +203,7 @@ class RosterController extends Controller
                 'shiftAssignments.employee.user',
                 'shiftAssignments.shift',
                 'managerDuties.employee.user',
+                'managerDuties.shift',
             ])
             ->firstOrFail();
 
@@ -260,6 +262,7 @@ class RosterController extends Controller
                             $existingDuty = ManagerDuty::where('roster_day_id', $dayId)
                                 ->where('employee_id', $assignment['employee_id'])
                                 ->where('duty_type', $employee->user->role)
+                                ->where('shift_id', $assignment['shift_id'])
                                 ->first();
                                 
                             if (!$existingDuty) {
@@ -267,6 +270,7 @@ class RosterController extends Controller
                                     'roster_day_id' => $dayId,
                                     'employee_id' => $assignment['employee_id'],
                                     'duty_type' => $employee->user->role,
+                                    'shift_id' => $assignment['shift_id'],
                                 ]);
                             }
                         }
@@ -286,10 +290,11 @@ class RosterController extends Controller
             // Process manager duties (manual override - optional)
             if ($request->has('manager_duties')) {
                 foreach ($request->manager_duties as $duty) {
-                    // Check if manager duty already exists
+                    // Check if manager duty already exists for this shift
                     $existing = ManagerDuty::where('roster_day_id', $dayId)
                         ->where('employee_id', $duty['employee_id'])
                         ->where('duty_type', $duty['duty_type'])
+                        ->where('shift_id', $duty['shift_id'])
                         ->first();
 
                     if (!$existing) {
@@ -297,6 +302,7 @@ class RosterController extends Controller
                             'roster_day_id' => $dayId,
                             'employee_id' => $duty['employee_id'],
                             'duty_type' => $duty['duty_type'],
+                            'shift_id' => $duty['shift_id'],
                         ]);
                         $assignmentCount++;
                     } else {
@@ -306,7 +312,7 @@ class RosterController extends Controller
                             'type' => 'manager_duty',
                             'employee' => $employee->user->name ?? 'Employee #' . $duty['employee_id'],
                             'duty_type' => $duty['duty_type'],
-                            'reason' => 'Already assigned as ' . $duty['duty_type']
+                            'reason' => 'Already assigned as ' . $duty['duty_type'] . ' for this shift'
                         ];
                     }
                 }
@@ -327,6 +333,7 @@ class RosterController extends Controller
                 'shiftAssignments.employee.user',
                 'shiftAssignments.shift',
                 'managerDuties.employee.user',
+                'managerDuties.shift',
             ]);
 
             // Get validation summary
@@ -416,6 +423,7 @@ class RosterController extends Controller
                         'roster_day_id' => $dayId,
                         'employee_id' => $duty['employee_id'],
                         'duty_type' => $duty['duty_type'],
+                        'shift_id' => $duty['shift_id'],
                     ]);
                     $assignmentCount++;
                 }
@@ -436,6 +444,7 @@ class RosterController extends Controller
                 'shiftAssignments.employee.user',
                 'shiftAssignments.shift',
                 'managerDuties.employee.user',
+                'managerDuties.shift',
             ]);
 
             // Get validation summary
@@ -600,7 +609,8 @@ class RosterController extends Controller
 
         $rosterDays = $rosterPeriod->rosterDays()->with([
             'shiftAssignments.employee',
-            'managerDuties.employee'
+            'managerDuties.employee',
+            'managerDuties.shift'
         ])->get();
 
         $validation['total_days'] = $rosterDays->count();
@@ -622,25 +632,17 @@ class RosterController extends Controller
                 'manager_count' => 0,
             ];
 
-            // Check Manager Teknik
-            $managerTeknikCount = $day->managerDuties()
-                ->whereHas('employee', function($q) {
-                    $q->where('employee_type', Employee::TYPE_MANAGER_TEKNIK);
-                })
-                ->count();
-
-            $dayValidation['manager_count'] = $managerTeknikCount;
-
-            if ($managerTeknikCount < 1) {
-                $dayValidation['is_valid'] = false;
-                $dayValidation['errors'][] = 'Missing Manager Teknik (required: minimum 1)';
-            }
+            // Check Manager Teknik per shift (not per day)
+            $managerDuties = $day->managerDuties;
+            $dayValidation['manager_count'] = $managerDuties->count();
 
             // Check each shift
             $shiftAssignments = $day->shiftAssignments->groupBy('shift_id');
+            $managerDutiesByShift = $managerDuties->groupBy('shift_id');
 
             foreach ($allShifts as $shift) {
                 $assignments = $shiftAssignments->get($shift->id, collect());
+                $shiftManagerDuties = $managerDutiesByShift->get($shift->id, collect());
                 
                 $cnsCount = $assignments->filter(function($a) {
                     return $a->employee->employee_type === Employee::TYPE_CNS;
@@ -650,13 +652,16 @@ class RosterController extends Controller
                     return $a->employee->employee_type === Employee::TYPE_SUPPORT;
                 })->count();
 
-                $shiftValid = $cnsCount >= 4 && $supportCount >= 2;
+                $hasManager = $shiftManagerDuties->where('duty_type', 'Manager Teknik')->count() >= 1;
+                $shiftValid = $cnsCount >= 4 && $supportCount >= 2 && $hasManager;
 
                 $shiftInfo = [
                     'shift_name' => $shift->name,
                     'cns_count' => $cnsCount,
                     'support_count' => $supportCount,
                     'total_count' => $assignments->count(),
+                    'has_manager' => $hasManager,
+                    'manager_count' => $shiftManagerDuties->count(),
                     'is_valid' => $shiftValid,
                 ];
 
@@ -668,7 +673,10 @@ class RosterController extends Controller
                         $message .= "Need 4 CNS (current: {$cnsCount}). ";
                     }
                     if ($supportCount < 2) {
-                        $message .= "Need 2 Support (current: {$supportCount}).";
+                        $message .= "Need 2 Support (current: {$supportCount}). ";
+                    }
+                    if (!$hasManager) {
+                        $message .= "Missing Manager Teknik for this shift.";
                     }
                     
                     $dayValidation['errors'][] = $message;

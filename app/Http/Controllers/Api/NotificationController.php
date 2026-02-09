@@ -21,12 +21,55 @@ class NotificationController extends Controller
 
     /**
      * GET /notifications
+     * Filter by category: inbox, starred, sent, trash
      */
     public function index(Request $request)
     {
-        $query = Notification::where('user_id', Auth::id())
-            ->select(['id', 'user_id', 'type', 'title', 'message', 'is_read', 'created_at']);
+        $user = Auth::user();
+        $category = $request->get('category', 'inbox'); // inbox, starred, sent, trash
+        
+        $query = Notification::with('sender:id,name,email');
 
+        // Filter by category
+        switch ($category) {
+            case 'inbox':
+                // Inbox: received notifications (not sent by user)
+                $query->where('user_id', $user->id)
+                      ->where('type', 'inbox')
+                      ->whereNull('deleted_at');
+                break;
+                
+            case 'starred':
+                // Starred: notifications marked as favorite (both received and sent)
+                $query->where(function($q) use ($user) {
+                    $q->where('user_id', $user->id)
+                      ->orWhere('sender_id', $user->id);
+                })
+                ->where('is_starred', true)
+                ->whereNull('deleted_at');
+                break;
+                
+            case 'sent':
+                // Sent: notifications sent by this user
+                $query->where('sender_id', $user->id)
+                      ->where('type', 'sent')
+                      ->whereNull('deleted_at');
+                break;
+                
+            case 'trash':
+                // Trash: soft deleted notifications
+                $query->where(function($q) use ($user) {
+                    $q->where('user_id', $user->id)
+                      ->orWhere('sender_id', $user->id);
+                })->whereNotNull('deleted_at')->withTrashed();
+                break;
+                
+            default:
+                $query->where('user_id', $user->id)
+                      ->whereNull('deleted_at');
+        }
+
+        // Filter by read status if provided
         if ($request->has('is_read')) {
             $query->where('is_read', $request->is_read);
         }
@@ -41,8 +84,11 @@ class NotificationController extends Controller
      */
     public function markAsRead($id)
     {
-        $notification = Notification::where('user_id', Auth::id())
-            ->findOrFail($id);
+        // Allow user to mark as read notifications they received OR sent
+        $notification = Notification::where(function($query) {
+            $query->where('user_id', Auth::id())
+                  ->orWhere('sender_id', Auth::id());
+        })->findOrFail($id);
 
         $notification->is_read = true;
         $notification->save();
@@ -86,6 +132,146 @@ class NotificationController extends Controller
             'message' => 'Notification created successfully',
             'data' => $notification,
         ], 201);
+    }
+
+    /**
+     * POST /notifications/send
+     * Send notification to another user
+     */
+    public function send(Request $request)
+    {
+        $request->validate([
+            'user_ids' => 'required|array',
+            'user_ids.*' => 'exists:users,id',
+            'title' => 'required|string|max:255',
+            'message' => 'required|string',
+            'send_email' => 'boolean',
+        ]);
+
+        $sender = Auth::user();
+        $sendEmail = $request->get('send_email', false);
+        $notifications = [];
+
+        foreach ($request->user_ids as $userId) {
+            $user = \App\Models\User::findOrFail($userId);
+            
+            // Create notification for receiver (inbox)
+            $inboxNotification = Notification::create([
+                'user_id' => $userId,
+                'sender_id' => $sender->id,
+                'title' => $request->title,
+                'message' => $request->message,
+                'type' => 'inbox',
+                'is_read' => false,
+            ]);
+
+            if ($sendEmail) {
+                $this->notificationService->resendEmail($inboxNotification);
+            }
+
+            // Create copy for sender (sent)
+            $sentNotification = Notification::create([
+                'user_id' => $userId,
+                'sender_id' => $sender->id,
+                'title' => $request->title,
+                'message' => $request->message,
+                'type' => 'sent',
+                'is_read' => true,
+            ]);
+
+            $notifications[] = $inboxNotification;
+            
+            // Clear cache
+            CacheHelper::clearNotificationCache($userId);
+        }
+
+        CacheHelper::clearNotificationCache($sender->id);
+
+        return response()->json([
+            'message' => 'Notification sent successfully',
+            'data' => $notifications,
+        ], 201);
+    }
+
+    /**
+     * POST /notifications/{id}/star
+     * Toggle star status
+     */
+    public function toggleStar($id)
+    {
+        // Allow user to star notifications they received OR sent
+        $notification = Notification::where(function($query) {
+            $query->where('user_id', Auth::id())
+                  ->orWhere('sender_id', Auth::id());
+        })->findOrFail($id);
+
+        $notification->is_starred = !$notification->is_starred;
+        $notification->save();
+
+        CacheHelper::clearNotificationCache(Auth::id());
+
+        return response()->json([
+            'message' => 'Notification ' . ($notification->is_starred ? 'starred' : 'unstarred'),
+            'data' => $notification,
+        ]);
+    }
+
+    /**
+     * DELETE /notifications/{id}
+     * Move to trash (soft delete)
+     */
+    public function destroy($id)
+    {
+        $notification = Notification::where(function($query) {
+            $query->where('user_id', Auth::id())
+                  ->orWhere('sender_id', Auth::id());
+        })->findOrFail($id);
+
+        $notification->delete();
+        CacheHelper::clearNotificationCache(Auth::id());
+
+        return response()->json([
+            'message' => 'Notification moved to trash',
+        ]);
+    }
+
+    /**
+     * POST /notifications/{id}/restore
+     * Restore from trash
+     */
+    public function restore($id)
+    {
+        $notification = Notification::where(function($query) {
+            $query->where('user_id', Auth::id())
+                  ->orWhere('sender_id', Auth::id());
+        })->withTrashed()->findOrFail($id);
+
+        $notification->restore();
+        CacheHelper::clearNotificationCache(Auth::id());
+
+        return response()->json([
+            'message' => 'Notification restored',
+            'data' => $notification,
+        ]);
+    }
+
+    /**
+     * DELETE /notifications/{id}/permanent
+     * Permanently delete
+     */
+    public function forceDestroy($id)
+    {
+        $notification = Notification::where(function($query) {
+            $query->where('user_id', Auth::id())
+                  ->orWhere('sender_id', Auth::id());
+        })->withTrashed()->findOrFail($id);
+
+        $notification->forceDelete();
+        CacheHelper::clearNotificationCache(Auth::id());
+
+        return response()->json([
+            'message' => 'Notification permanently deleted',
+        ]);
     }
 
     /**

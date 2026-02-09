@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\EmployeeScheduleController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\RosterController;
 use App\Http\Controllers\Api\RosterImportController;
@@ -20,6 +21,7 @@ Route::prefix('auth')->group(function () {
     Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
     
     Route::middleware('auth:sanctum')->group(function () {
+        Route::get('/me', [AuthController::class, 'me']);
         Route::post('/logout', [AuthController::class, 'logout']);
         Route::post('/change-password', [AuthController::class, 'changePassword']);
     });
@@ -46,24 +48,30 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // =======================================
-    // ROSTERING
+    // ROSTERING (Read-only: All authenticated users)
+    // =======================================
+    Route::prefix('rosters')->group(function () {
+        Route::get('/', [RosterController::class, 'index']);
+        Route::get('/{id}', [RosterController::class, 'show']);
+        Route::get('/{id}/validate', [RosterController::class, 'validateBeforePublish']);
+        Route::get('/{roster_id}/days/{day_id}', [RosterController::class, 'showDay']);
+    });
+
+    // =======================================
+    // ROSTERING (Write: Admin, Manager Teknik, General Manager only)
     // =======================================
     Route::prefix('rosters')->middleware('role:' . User::ROLE_ADMIN . ',' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER)->group(function () {
-        Route::get('/', [RosterController::class, 'index']);
         Route::post('/', [RosterController::class, 'store']);
         Route::post('/import', [RosterImportController::class, 'import']);
         Route::post('/import-url', [RosterImportController::class, 'importFromUrl']);
-        Route::get('/{id}', [RosterController::class, 'show']);
         Route::put('/{id}', [RosterController::class, 'update']);
         Route::delete('/{id}', [RosterController::class, 'destroy']);
-        Route::get('/{id}/validate', [RosterController::class, 'validateBeforePublish']);
         Route::post('/{id}/publish', [RosterController::class, 'publish']);
         Route::post('/{id}/sync', [RosterImportController::class, 'syncFromSpreadsheet']);
         Route::post('/{id}/push', [RosterImportController::class, 'pushToSpreadsheet']);
         Route::put('/{id}/spreadsheet-url', [RosterImportController::class, 'updateSpreadsheetUrl']);
         
         // Roster day assignments
-        Route::get('/{roster_id}/days/{day_id}', [RosterController::class, 'showDay']);
         Route::post('/{roster_id}/days/{day_id}/assignments', [RosterController::class, 'storeAssignments']);
         Route::put('/{roster_id}/days/{day_id}/assignments', [RosterController::class, 'updateAssignments']);
         Route::delete('/{roster_id}/days/{day_id}/assignments/{assignment_id}', [RosterController::class, 'deleteAssignment']);
@@ -73,6 +81,8 @@ Route::middleware('auth:sanctum')->group(function () {
     // SHIFT REQUEST
     // =======================================
     Route::prefix('shift-requests')->group(function () {
+        Route::get('/my-shifts', [ShiftRequestController::class, 'getMyShifts']);
+        Route::get('/available-partners', [ShiftRequestController::class, 'getAvailablePartners']);
         Route::post('/', [ShiftRequestController::class, 'store']);
         Route::post('/{id}/approve-target', [ShiftRequestController::class, 'approveByTarget']);
         Route::post('/{id}/approve-manager', [ShiftRequestController::class, 'approveByManager'])->middleware('role:' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER);
@@ -84,7 +94,12 @@ Route::middleware('auth:sanctum')->group(function () {
     // =======================================
     Route::prefix('notifications')->group(function () {
         Route::get('/', [NotificationController::class, 'index']);
+        Route::post('/send', [NotificationController::class, 'send']);
         Route::post('/{id}/read', [NotificationController::class, 'markAsRead']);
+        Route::post('/{id}/star', [NotificationController::class, 'toggleStar']);
+        Route::post('/{id}/restore', [NotificationController::class, 'restore']);
+        Route::delete('/{id}', [NotificationController::class, 'destroy']);
+        Route::delete('/{id}/permanent', [NotificationController::class, 'forceDestroy']);
         Route::post('/{id}/resend-email', [NotificationController::class, 'resendEmail']);
         
         // Admin and managers can create notifications
@@ -98,5 +113,13 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/', [ActivityLogController::class, 'index']);
         Route::get('/recent', [ActivityLogController::class, 'recent']);
         Route::get('/statistics', [ActivityLogController::class, 'statistics']);
+    });
+
+    // =======================================
+    // EMPLOYEE PERSONAL SCHEDULE
+    // =======================================
+    Route::prefix('employee')->group(function () {
+        Route::get('/my-schedule', [EmployeeScheduleController::class, 'getMySchedule']);
+        Route::get('/roster/{rosterId}/my-schedule', [EmployeeScheduleController::class, 'getMyScheduleByRoster']);
     });
 });

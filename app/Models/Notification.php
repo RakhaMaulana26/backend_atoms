@@ -12,9 +12,12 @@ class Notification extends Model
 
     protected $fillable = [
         'user_id',
+        'sender_id',
         'title',
         'message',
         'is_read',
+        'is_starred',
+        'type',
         'email_sent',
         'email_sent_at',
     ];
@@ -23,6 +26,7 @@ class Notification extends Model
     {
         return [
             'is_read' => 'boolean',
+            'is_starred' => 'boolean',
             'email_sent' => 'boolean',
             'email_sent_at' => 'datetime',
         ];
@@ -31,5 +35,10 @@ class Notification extends Model
     public function user()
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function sender()
+    {
+        return $this->belongsTo(User::class, 'sender_id');
     }
 }

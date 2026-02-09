@@ -51,6 +51,9 @@ class AuthController extends Controller
             'description' => 'User logged in',
         ]);
 
+        // Load employee relationship for frontend
+        $user->load('employee');
+
         return response()->json([
             'access_token' => $token,
             'token_type' => 'Bearer',
@@ -221,6 +224,19 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'Logged out successfully'
+        ]);
+    }
+
+    /**
+     * GET /auth/me
+     * Get current authenticated user with relationships
+     */
+    public function me(Request $request)
+    {
+        $user = $request->user()->load('employee');
+
+        return response()->json([
+            'user' => $user,
         ]);
     }
 

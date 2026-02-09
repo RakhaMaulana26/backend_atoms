@@ -15,6 +15,7 @@ class ManagerDuty extends Model
         'roster_day_id',
         'employee_id',
         'duty_type',
+        'shift_id',
     ];
 
     public function rosterDay()
@@ -25,5 +26,10 @@ class ManagerDuty extends Model
     public function employee()
     {
         return $this->belongsTo(Employee::class);
+    }
+
+    public function shift()
+    {
+        return $this->belongsTo(Shift::class);
     }
 }

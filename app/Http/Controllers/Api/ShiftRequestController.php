@@ -8,6 +8,8 @@ use App\Models\Employee;
 use App\Models\ManagerDuty;
 use App\Models\Notification;
 use App\Models\ShiftRequest;
+use App\Models\ShiftAssignment;
+use App\Models\RosterPeriod;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
@@ -132,14 +134,26 @@ class ShiftRequestController extends Controller
             ], 403);
         }
 
-        // Check if this manager is responsible for either day
+        // Check if this manager is responsible for the shift on either day
         $isFromManager = ManagerDuty::where('roster_day_id', $shiftRequest->from_roster_day_id)
             ->where('employee_id', $employee->id)
+            ->where('shift_id', $shiftRequest->shift_id)
             ->exists();
 
         $isToManager = ManagerDuty::where('roster_day_id', $shiftRequest->to_roster_day_id)
             ->where('employee_id', $employee->id)
+            ->where('shift_id', $shiftRequest->shift_id)
             ->exists();
+
+        // Fallback: check if manager has any duty on those days (for backwards compatibility)
+        if (!$isFromManager && !$isToManager) {
+            $isFromManager = ManagerDuty::where('roster_day_id', $shiftRequest->from_roster_day_id)
+                ->where('employee_id', $employee->id)
+                ->exists();
+            $isToManager = ManagerDuty::where('roster_day_id', $shiftRequest->to_roster_day_id)
+                ->where('employee_id', $employee->id)
+                ->exists();
+        }
 
         if (!$isFromManager && !$isToManager) {
             return response()->json([
@@ -205,6 +219,11 @@ class ShiftRequestController extends Controller
                 $shiftRequest->to_roster_day_id,
             ])
                 ->where('employee_id', $employee->id)
+                ->where(function ($query) use ($shiftRequest) {
+                    // Check manager for specific shift or any duty on those days
+                    $query->where('shift_id', $shiftRequest->shift_id)
+                        ->orWhereNull('shift_id');
+                })
                 ->exists();
 
             if ($isManager) {
@@ -246,11 +265,15 @@ class ShiftRequestController extends Controller
      */
     private function notifyManagers(ShiftRequest $shiftRequest)
     {
+        // Find manager for the specific shift on the from-day
         $fromManager = ManagerDuty::where('roster_day_id', $shiftRequest->from_roster_day_id)
+            ->where('shift_id', $shiftRequest->shift_id)
             ->with('employee.user')
             ->first();
 
+        // Find manager for the specific shift on the to-day
         $toManager = ManagerDuty::where('roster_day_id', $shiftRequest->to_roster_day_id)
+            ->where('shift_id', $shiftRequest->shift_id)
             ->with('employee.user')
             ->first();
 
@@ -291,6 +314,140 @@ class ShiftRequestController extends Controller
             'user_id' => $shiftRequest->targetEmployee->user_id,
             'title' => 'Tukar Shift Disetujui',
             'message' => 'Tukar shift dengan ' . $shiftRequest->requesterEmployee->user->name . ' telah disetujui',
+        ]);
+    }
+
+    /**
+     * GET /shift-requests/my-shifts
+     * Get current user's upcoming shifts
+     */
+    public function getMyShifts(Request $request)
+    {
+        $employee = Auth::user()->employee;
+
+        if (!$employee) {
+            return response()->json([
+                'message' => 'You must be an employee to view shifts'
+            ], 403);
+        }
+
+        // Alternative approach: Get from published rosters directly
+        $rosterPeriods = RosterPeriod::where('status', 'published')
+            ->with([
+                'rosterDays' => function ($query) use ($employee) {
+                    $query->where('work_date', '>=', now()->toDateString())
+                        ->orderBy('work_date', 'asc');
+                },
+                'rosterDays.shiftAssignments' => function ($query) use ($employee) {
+                    $query->where('employee_id', $employee->id);
+                },
+                'rosterDays.shiftAssignments.shift'
+            ])
+            ->get();
+
+        $shifts = [];
+        foreach ($rosterPeriods as $period) {
+            foreach ($period->rosterDays as $day) {
+                foreach ($day->shiftAssignments as $assignment) {
+                    $shifts[] = [
+                        'roster_day_id' => $day->id,
+                        'work_date' => $day->work_date,
+                        'shift_id' => $assignment->shift_id,
+                        'shift_name' => $assignment->shift->name,
+                    ];
+                }
+            }
+        }
+
+        return response()->json([
+            'data' => $shifts,
+            'count' => count($shifts),
+        ]);
+    }
+
+    /**
+     * GET /shift-requests/available-partners
+     * Get employees available for shift swap based on criteria
+     */
+    public function getAvailablePartners(Request $request)
+    {
+        $request->validate([
+            'roster_day_id' => 'sometimes|exists:roster_days,id',
+            'shift_id' => 'sometimes|exists:shifts,id',
+            'employee_id' => 'sometimes|exists:employees,id',
+        ]);
+
+        $currentEmployee = Auth::user()->employee;
+
+        if (!$currentEmployee) {
+            return response()->json([
+                'message' => 'You must be an employee'
+            ], 403);
+        }
+
+        $query = ShiftAssignment::with(['employee.user', 'rosterDay', 'shift'])
+            ->where('employee_id', '!=', $currentEmployee->id)
+            ->whereHas('rosterDay', function ($q) {
+                // Only future dates from published rosters
+                $q->where('work_date', '>=', now()->toDateString())
+                    ->whereHas('rosterPeriod', function ($query) {
+                        $query->where('status', 'published');
+                    });
+            });
+
+        // Filter by roster day if provided
+        if ($request->has('roster_day_id')) {
+            $query->where('roster_day_id', $request->roster_day_id);
+        }
+
+        // Filter by shift if provided
+        if ($request->has('shift_id')) {
+            $query->where('shift_id', $request->shift_id);
+        }
+
+        // Filter by specific employee if provided
+        if ($request->has('employee_id')) {
+            $query->where('employee_id', $request->employee_id);
+        }
+
+        // Filter by same role (CNS with CNS, etc)
+        $query->whereHas('employee', function ($q) use ($currentEmployee) {
+            $q->where('role', $currentEmployee->role);
+        });
+
+        $assignments = $query->get()->map(function ($assignment) {
+            return [
+                'employee_id' => $assignment->employee_id,
+                'employee_name' => $assignment->employee->user->name,
+                'employee_role' => $assignment->employee->role,
+                'roster_day_id' => $assignment->roster_day_id,
+                'work_date' => $assignment->rosterDay->work_date,
+                'shift_id' => $assignment->shift_id,
+                'shift_name' => $assignment->shift->name,
+            ];
+        });
+
+        // Group by employee for easier frontend handling
+        $grouped = $assignments->groupBy('employee_id')->map(function ($items, $employeeId) {
+            $first = $items->first();
+            return [
+                'employee_id' => $employeeId,
+                'employee_name' => $first['employee_name'],
+                'employee_role' => $first['employee_role'],
+                'available_shifts' => $items->map(function ($item) {
+                    return [
+                        'roster_day_id' => $item['roster_day_id'],
+                        'work_date' => $item['work_date'],
+                        'shift_id' => $item['shift_id'],
+                        'shift_name' => $item['shift_name'],
+                    ];
+                })->values()->toArray(),
+            ];
+        })->values();
+
+        return response()->json([
+            'data' => $grouped,
+            'count' => $grouped->count(),
         ]);
     }
 }

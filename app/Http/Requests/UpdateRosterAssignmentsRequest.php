@@ -28,6 +28,7 @@ class UpdateRosterAssignmentsRequest extends FormRequest
             'manager_duties' => 'sometimes|array',
             'manager_duties.*.employee_id' => 'required|exists:employees,id',
             'manager_duties.*.duty_type' => 'required|string|in:Manager Teknik,General Manager',
+            'manager_duties.*.shift_id' => 'required|exists:shifts,id',
         ];
     }
 
@@ -49,6 +50,8 @@ class UpdateRosterAssignmentsRequest extends FormRequest
             'manager_duties.*.employee_id.exists' => 'Employee tidak ditemukan',
             'manager_duties.*.duty_type.required' => 'Duty type wajib diisi',
             'manager_duties.*.duty_type.in' => 'Duty type harus Manager Teknik atau General Manager',
+            'manager_duties.*.shift_id.required' => 'Shift ID wajib diisi untuk setiap manager duty',
+            'manager_duties.*.shift_id.exists' => 'Shift tidak ditemukan',
         ];
     }
 }

@@ -195,6 +195,7 @@ Table manager_duties {
   roster_day_id bigint [ref: > roster_days.id, not null]
   employee_id bigint [ref: > employees.id, not null]
   duty_type varchar(255) [not null, note: 'Manager Teknik, General Manager']
+  shift_id bigint [ref: > shifts.id, null, note: 'Which shift this manager is assigned to']
   created_at timestamp
   updated_at timestamp
   deleted_at timestamp [null]
@@ -205,8 +206,10 @@ Table manager_duties {
   deleted_by bigint [null]
   
   Note: '''
-    Manager duty assignments for each day.
-    Validation: Each day requires minimum 1 Manager Teknik
+    Manager duty assignments for each shift on each day.
+    Each shift requires a Manager Teknik.
+    Based on Jadwal Dinas Airnav format where managers (MT) 
+    are assigned per shift (P/S/M), not per day.
   '''
   Indexes {
     roster_day_id

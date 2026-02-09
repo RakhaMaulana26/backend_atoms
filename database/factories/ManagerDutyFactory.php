@@ -17,6 +17,7 @@ class ManagerDutyFactory extends Factory
             'roster_day_id' => RosterDay::factory(),
             'employee_id' => Employee::factory(),
             'duty_type' => fake()->randomElement(['Manager Teknik', 'General Manager']),
+            'shift_id' => \App\Models\Shift::factory(),
         ];
     }
 }
