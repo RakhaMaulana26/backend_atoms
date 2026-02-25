@@ -13,6 +13,8 @@ class Shift extends Model
 
     protected $fillable = [
         'name',
+        'start_time',
+        'end_time',
     ];
 
     public function shiftAssignments()

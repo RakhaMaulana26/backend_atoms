@@ -16,10 +16,26 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // Create default shifts
-        $shifts = ['pagi', 'siang', 'malam', 'libur', 'cuti_tahunan', 'cuti_sakit', 'dinas_luar', 'office_hour', 'standby', 'lepas_malam', 'tugas_belajar'];
-        foreach ($shifts as $shiftName) {
-            Shift::firstOrCreate(['name' => $shiftName]);
+        // Create default shifts with time ranges
+        $shiftsData = [
+            ['name' => 'pagi', 'start_time' => '07:00:00', 'end_time' => '13:00:00'],
+            ['name' => 'siang', 'start_time' => '13:00:00', 'end_time' => '19:00:00'],
+            ['name' => 'malam', 'start_time' => '19:00:00', 'end_time' => '07:00:00'],
+            ['name' => 'libur', 'start_time' => null, 'end_time' => null],
+            ['name' => 'cuti_tahunan', 'start_time' => null, 'end_time' => null],
+            ['name' => 'cuti_sakit', 'start_time' => null, 'end_time' => null],
+            ['name' => 'dinas_luar', 'start_time' => null, 'end_time' => null],
+            ['name' => 'office_hour', 'start_time' => '08:00:00', 'end_time' => '17:00:00'],
+            ['name' => 'standby', 'start_time' => null, 'end_time' => null],
+            ['name' => 'lepas_malam', 'start_time' => null, 'end_time' => null],
+            ['name' => 'tugas_belajar', 'start_time' => null, 'end_time' => null],
+        ];
+        
+        foreach ($shiftsData as $shiftData) {
+            Shift::updateOrCreate(
+                ['name' => $shiftData['name']], 
+                $shiftData
+            );
         }
 
         // Create Admin user
@@ -39,11 +55,11 @@ class DatabaseSeeder extends Seeder
         // TEKNIK MT & PT MT (5 employees)
         // ================================
         $teknikMT = [
-            ['name' => 'Aditya Huzairi P', 'kelas' => 13, 'jabatan' => 'SVP CNS'],
-            ['name' => 'Andi Wibowo', 'kelas' => 15, 'jabatan' => 'MT 2'],
-            ['name' => 'Efried N.P.', 'kelas' => 15, 'jabatan' => 'MT 3'],
-            ['name' => 'Fajar Kusuma W', 'kelas' => 13, 'jabatan' => 'SPV TFP'],
-            ['name' => 'Netty Septa C.', 'kelas' => 15, 'jabatan' => 'MT 5'],
+            ['name' => 'Aditya Huzairi P', 'kelas' => 13, 'jabatan' => 'SVP CNS', 'group' => 1],
+            ['name' => 'Andi Wibowo', 'kelas' => 15, 'jabatan' => 'MT 2', 'group' => 1],
+            ['name' => 'Efried N.P.', 'kelas' => 15, 'jabatan' => 'MT 3', 'group' => 1],
+            ['name' => 'Fajar Kusuma W', 'kelas' => 13, 'jabatan' => 'SPV TFP', 'group' => 1],
+            ['name' => 'Netty Septa C.', 'kelas' => 15, 'jabatan' => 'MT 5', 'group' => 1],
         ];
 
         // ================================
@@ -51,39 +67,39 @@ class DatabaseSeeder extends Seeder
         // ================================
         $cnsd = [
             // Grup 1
-            ['name' => 'Moch. Ichsan', 'kelas' => 14, 'jabatan' => 'FIRST SPV CNS'],
-            ['name' => 'Argo Pragolo', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Khoirul M.A', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Saiful Bahris', 'kelas' => 9, 'jabatan' => 'CNS'],
-            ['name' => 'Silvy Retno Andriani', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Tria Sabda Utama', 'kelas' => 11, 'jabatan' => 'CNS'],
+            ['name' => 'Moch. Ichsan', 'kelas' => 14, 'jabatan' => 'FIRST SPV CNS', 'group' => 1],
+            ['name' => 'Argo Pragolo', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 1],
+            ['name' => 'Khoirul M.A', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 1],
+            ['name' => 'Saiful Bahris', 'kelas' => 9, 'jabatan' => 'CNS', 'group' => 1],
+            ['name' => 'Silvy Retno Andriani', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 1],
+            ['name' => 'Tria Sabda Utama', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 1],
             // Grup 2
-            ['name' => 'Febri Dwi C', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'M. Yusuf Triono', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Dani Ridzal', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Nur Shella Firdaus', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Amirzan Ridho W', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Erazuardi Zulfahmi', 'kelas' => 8, 'jabatan' => 'CNS'],
+            ['name' => 'Febri Dwi C', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 2],
+            ['name' => 'M. Yusuf Triono', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 2],
+            ['name' => 'Dani Ridzal', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 2],
+            ['name' => 'Nur Shella Firdaus', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 2],
+            ['name' => 'Amirzan Ridho W', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 2],
+            ['name' => 'Erazuardi Zulfahmi', 'kelas' => 8, 'jabatan' => 'CNS', 'group' => 2],
             // Grup 3
-            ['name' => 'Nur Hukim', 'kelas' => 14, 'jabatan' => 'SPV CNS'],
-            ['name' => 'Moh. Syamsudin', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Rhomadoni S.K.D', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Yourdan C.P', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Safira Saraswati', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Aldhi Deska P', 'kelas' => 11, 'jabatan' => 'CNS'],
+            ['name' => 'Nur Hukim', 'kelas' => 14, 'jabatan' => 'SPV CNS', 'group' => 3],
+            ['name' => 'Moh. Syamsudin', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 3],
+            ['name' => 'Rhomadoni S.K.D', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 3],
+            ['name' => 'Yourdan C.P', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 3],
+            ['name' => 'Safira Saraswati', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 3],
+            ['name' => 'Aldhi Deska P', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 3],
             // Grup 4
-            ['name' => 'Riyan Fauzi', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Pandu Indra Jaya', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Elvita Agustina', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Rendy Panca A P', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'I Kadek Dwija S', 'kelas' => 11, 'jabatan' => 'CNS'],
+            ['name' => 'Riyan Fauzi', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 4],
+            ['name' => 'Pandu Indra Jaya', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 4],
+            ['name' => 'Elvita Agustina', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 4],
+            ['name' => 'Rendy Panca A P', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 4],
+            ['name' => 'I Kadek Dwija S', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 4],
             // Grup 5
-            ['name' => 'Teguh M', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Yusri H.', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Dwiki Setyo W', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Septi Rahman sari', 'kelas' => 11, 'jabatan' => 'CNS'],
-            ['name' => 'Adam bukhori', 'kelas' => 12, 'jabatan' => 'CNS'],
-            ['name' => 'Windi Tri Setyawati', 'kelas' => 11, 'jabatan' => 'CNS'],
+            ['name' => 'Teguh M', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 5],
+            ['name' => 'Yusri H.', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 5],
+            ['name' => 'Dwiki Setyo W', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 5],
+            ['name' => 'Septi Rahman sari', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 5],
+            ['name' => 'Adam bukhori', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 5],
+            ['name' => 'Windi Tri Setyawati', 'kelas' => 11, 'jabatan' => 'CNS', 'group' => 5],
         ];
 
         // ================================
@@ -91,26 +107,26 @@ class DatabaseSeeder extends Seeder
         // ================================
         $tfp = [
             // Grup 1
-            ['name' => 'Iqbal Mustika', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'Agustina Anggreini', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'Fajar Nugroho', 'kelas' => 10, 'jabatan' => 'TFP'],
-            ['name' => 'Bian Prasetia H', 'kelas' => 8, 'jabatan' => 'TFP'],
+            ['name' => 'Iqbal Mustika', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 1],
+            ['name' => 'Agustina Anggreini', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 1],
+            ['name' => 'Fajar Nugroho', 'kelas' => 10, 'jabatan' => 'TFP', 'group' => 1],
+            ['name' => 'Bian Prasetia H', 'kelas' => 8, 'jabatan' => 'TFP', 'group' => 1],
             // Grup 2
-            ['name' => 'Sofi Dwi Hidayati', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'M. Feizar Noor', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'Dwi Prasetyo Adi', 'kelas' => 11, 'jabatan' => 'TFP'],
+            ['name' => 'Sofi Dwi Hidayati', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 2],
+            ['name' => 'M. Feizar Noor', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 2],
+            ['name' => 'Dwi Prasetyo Adi', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 2],
             // Grup 3
-            ['name' => 'Yoga Arifal P', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'Ilmin Syarif H', 'kelas' => 9, 'jabatan' => 'TFP'],
+            ['name' => 'Yoga Arifal P', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 3],
+            ['name' => 'Ilmin Syarif H', 'kelas' => 9, 'jabatan' => 'TFP', 'group' => 3],
             // Grup 4
-            ['name' => 'Dwi Puji Rahayu', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'Andhika Bhaskara J', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'M. Aidin Effendi', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'A. M. Yasin', 'kelas' => 8, 'jabatan' => 'TFP'],
+            ['name' => 'Dwi Puji Rahayu', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 4],
+            ['name' => 'Andhika Bhaskara J', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 4],
+            ['name' => 'M. Aidin Effendi', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 4],
+            ['name' => 'A. M. Yasin', 'kelas' => 8, 'jabatan' => 'TFP', 'group' => 4],
             // Grup 5
-            ['name' => 'Priyoko', 'kelas' => 13, 'jabatan' => 'SPV TFP'],
-            ['name' => 'Frisza Vradana', 'kelas' => 11, 'jabatan' => 'TFP'],
-            ['name' => 'Karang Samudra', 'kelas' => 9, 'jabatan' => 'TFP'],
+            ['name' => 'Priyoko', 'kelas' => 13, 'jabatan' => 'SPV TFP', 'group' => 5],
+            ['name' => 'Frisza Vradana', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 5],
+            ['name' => 'Karang Samudra', 'kelas' => 9, 'jabatan' => 'TFP', 'group' => 5],
         ];
 
         // Create all employees
@@ -129,7 +145,6 @@ class DatabaseSeeder extends Seeder
             $this->createEmployee($emp, 'support');
         }
 
-        $this->command->info('✅ Default shifts created: ' . implode(', ', $shifts));
         $this->command->info('✅ Admin user created: admin@airnav.com / password');
         $this->command->info('✅ Airnav employees created:');
         $this->command->info('   - Teknik MT & PT MT: 5 employees (Manager Teknik)');
@@ -177,6 +192,7 @@ class DatabaseSeeder extends Seeder
         $user->employee()->create([
             'employee_type' => $employeeType,
             'is_active' => true,
+            'group_number' => $data['group'] ?? null,
         ]);
     }
 }

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\CreateRosterPeriodRequest;
 use App\Http\Requests\StoreRosterAssignmentsRequest;
 use App\Http\Requests\UpdateRosterAssignmentsRequest;
+use App\Http\Requests\QuickUpdateAssignmentRequest;
 use App\Models\ActivityLog;
 use App\Models\Employee;
 use App\Models\ManagerDuty;
@@ -70,13 +71,13 @@ class RosterController extends Controller
                 'status' => 'draft',
             ]);
 
-            // Auto-generate all days for the month (no shift assignments yet)
+            // Auto-generate all days for the month with all employees marked as "Libur"
             $daysInMonth = cal_days_in_month(CAL_GREGORIAN, $request->month, $request->year);
             
             for ($day = 1; $day <= $daysInMonth; $day++) {
                 $date = sprintf('%04d-%02d-%02d', $request->year, $request->month, $day);
                 
-                // Create roster day (without manager or shift assignments)
+                // Create roster day (no assignments yet - will be assigned manually)
                 RosterDay::create([
                     'roster_period_id' => $rosterPeriod->id,
                     'work_date' => $date,
@@ -96,9 +97,32 @@ class RosterController extends Controller
             // Clear roster cache
             CacheHelper::clearRosterCache();
 
+            // Load relationships for frontend cache
+            $rosterPeriod->load([
+                'rosterDays.shiftAssignments.shift',
+                'rosterDays.shiftAssignments.employee.user',
+            ]);
+
+            // Include all employees (for roster view initialization)
+            $allEmployees = \App\Models\Employee::with('user')
+                ->where('is_active', true)
+                ->whereNotNull('group_number')
+                ->where('group_number', '>', 0)
+                ->orderBy('employee_type')
+                ->orderBy('group_number')
+                ->orderBy('user_id')
+                ->get();
+
+            // Include all shifts (for dropdown options)
+            $allShifts = \App\Models\Shift::orderBy('id')->get();
+
             return response()->json([
-                'message' => 'Roster template created successfully. You can now assign managers and shifts to each day.',
-                'data' => $rosterPeriod->load('rosterDays'),
+                'message' => 'Roster template created successfully. You can now assign employees to shifts.',
+                'data' => [
+                    'roster_period' => $rosterPeriod,
+                    'all_employees' => $allEmployees,
+                    'all_shifts' => $allShifts,
+                ],
             ], 201);
         } catch (\Exception $e) {
             DB::rollBack();
@@ -129,7 +153,24 @@ class RosterController extends Controller
             'rosterDays.managerDuties.shift',
         ])->findOrFail($id);
 
-        return response()->json($rosterPeriod);
+        // Include all employees (for roster view initialization)
+        $allEmployees = \App\Models\Employee::with('user')
+            ->where('is_active', true)
+            ->whereNotNull('group_number')
+            ->where('group_number', '>', 0)
+            ->orderBy('employee_type')
+            ->orderBy('group_number')
+            ->orderBy('user_id')
+            ->get();
+
+        // Include all shifts (for dropdown options)
+        $allShifts = \App\Models\Shift::orderBy('id')->get();
+
+        return response()->json([
+            'roster_period' => $rosterPeriod,
+            'all_employees' => $allEmployees,
+            'all_shifts' => $allShifts,
+        ]);
     }
 
     /**
@@ -254,6 +295,7 @@ class RosterController extends Controller
                             'roster_day_id' => $dayId,
                             'employee_id' => $assignment['employee_id'],
                             'shift_id' => $assignment['shift_id'],
+                            'notes' => $assignment['notes'] ?? null,
                         ]);
                         $assignmentCount++;
                         
@@ -411,6 +453,7 @@ class RosterController extends Controller
                         'roster_day_id' => $dayId,
                         'employee_id' => $assignment['employee_id'],
                         'shift_id' => $assignment['shift_id'],
+                        'notes' => $assignment['notes'] ?? null,
                     ]);
                     $assignmentCount++;
                 }
@@ -857,6 +900,233 @@ class RosterController extends Controller
             DB::rollBack();
             return response()->json([
                 'message' => 'Failed to delete roster',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * POST /rosters/{roster_id}/assignments/quick-update
+     * Quick update assignment for one or multiple days
+     * Simplified endpoint with cleaner JSON structure
+     */
+    public function quickUpdateAssignment(QuickUpdateAssignmentRequest $request, $rosterId)
+    {
+        DB::beginTransaction();
+        try {
+            // Verify roster period exists
+            $rosterPeriod = RosterPeriod::findOrFail($rosterId);
+
+            // Check if roster is already published
+            if ($rosterPeriod->isPublished()) {
+                return response()->json([
+                    'message' => 'Cannot modify published roster'
+                ], 400);
+            }
+
+            // Find shift by name or ID
+            $shift = null;
+            if (is_numeric($request->shift)) {
+                $shift = Shift::find($request->shift);
+            } else {
+                $shift = Shift::where('name', 'like', '%' . $request->shift . '%')->first();
+            }
+
+            if (!$shift) {
+                return response()->json([
+                    'message' => 'Shift not found: ' . $request->shift
+                ], 404);
+            }
+
+            $updatedDays = [];
+
+            // Process each date
+            foreach ($request->work_dates as $workDate) {
+                // Find or create roster day
+                $rosterDay = RosterDay::where('roster_period_id', $rosterId)
+                    ->where('work_date', $workDate)
+                    ->first();
+
+                if (!$rosterDay) {
+                    // Create roster day if doesn't exist
+                    $rosterDay = RosterDay::create([
+                        'roster_period_id' => $rosterId,
+                        'work_date' => $workDate,
+                    ]);
+                }
+
+                // Delete existing assignment for this employee on this day
+                ShiftAssignment::where('roster_day_id', $rosterDay->id)
+                    ->where('employee_id', $request->employee_id)
+                    ->delete();
+
+                // Create new assignment
+                $assignment = ShiftAssignment::create([
+                    'roster_day_id' => $rosterDay->id,
+                    'employee_id' => $request->employee_id,
+                    'shift_id' => $shift->id,
+                    'notes' => $request->notes ?? null,
+                ]);
+
+                // Load relationships
+                $assignment->load('employee.user', 'shift');
+
+                $updatedDays[] = [
+                    'date' => $workDate,
+                    'roster_day_id' => $rosterDay->id,
+                    'assignment' => $assignment,
+                ];
+            }
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'update',
+                'module' => 'roster',
+                'reference_id' => $rosterId,
+                'description' => 'Quick updated assignment for employee ' . $request->employee_id . ' on ' . count($request->work_dates) . ' day(s)',
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Assignment updated successfully',
+                'data' => [
+                    'roster_id' => $rosterId,
+                    'employee_id' => $request->employee_id,
+                    'shift' => $shift->name,
+                    'dates_updated' => count($request->work_dates),
+                    'updated_days' => $updatedDays,
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to update assignment',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Batch update assignments for multiple employees and dates
+     * POST /api/rosters/:roster_id/assignments/batch-update
+     * 
+     * @param Request $request
+     * @param int $rosterId
+     * @return JsonResponse
+     */
+    public function batchUpdateAssignments(Request $request, $rosterId)
+    {
+        // Validate request
+        $validated = $request->validate([
+            'assignments' => 'required|array',
+            'assignments.*.employee_id' => 'required|integer|exists:employees,id',
+            'assignments.*.work_dates' => 'required|array',
+            'assignments.*.work_dates.*' => 'required|date_format:Y-m-d',
+            'assignments.*.shift' => 'required',
+            'assignments.*.notes' => 'nullable|string',
+        ]);
+
+        DB::beginTransaction();
+        try {
+            // Verify roster period exists
+            $rosterPeriod = RosterPeriod::findOrFail($rosterId);
+
+            // Check if roster is already published
+            if ($rosterPeriod->isPublished()) {
+                return response()->json([
+                    'message' => 'Cannot modify published roster'
+                ], 400);
+            }
+
+            $allUpdatedDays = [];
+            $totalUpdates = 0;
+
+            // Process each assignment batch
+            foreach ($validated['assignments'] as $assignmentData) {
+                // Find shift by name or ID
+                $shift = null;
+                if (is_numeric($assignmentData['shift'])) {
+                    $shift = Shift::find($assignmentData['shift']);
+                } else {
+                    $shift = Shift::where('name', 'like', '%' . $assignmentData['shift'] . '%')->first();
+                }
+
+                if (!$shift) {
+                    continue; // Skip if shift not found
+                }
+
+                // Process each date for this employee
+                foreach ($assignmentData['work_dates'] as $workDate) {
+                    // Find or create roster day
+                    $rosterDay = RosterDay::where('roster_period_id', $rosterId)
+                        ->where('work_date', $workDate)
+                        ->first();
+
+                    if (!$rosterDay) {
+                        // Create roster day if doesn't exist
+                        $rosterDay = RosterDay::create([
+                            'roster_period_id' => $rosterId,
+                            'work_date' => $workDate,
+                        ]);
+                    }
+
+                    // Delete existing assignment for this employee on this day
+                    ShiftAssignment::where('roster_day_id', $rosterDay->id)
+                        ->where('employee_id', $assignmentData['employee_id'])
+                        ->delete();
+
+                    // Create new assignment
+                    $assignment = ShiftAssignment::create([
+                        'roster_day_id' => $rosterDay->id,
+                        'employee_id' => $assignmentData['employee_id'],
+                        'shift_id' => $shift->id,
+                        'notes' => $assignmentData['notes'] ?? null,
+                    ]);
+
+                    // Load relationships
+                    $assignment->load('employee.user', 'shift');
+
+                    $allUpdatedDays[] = [
+                        'employee_id' => $assignmentData['employee_id'],
+                        'date' => $workDate,
+                        'roster_day_id' => $rosterDay->id,
+                        'assignment' => $assignment,
+                    ];
+
+                    $totalUpdates++;
+                }
+            }
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'update',
+                'module' => 'roster',
+                'reference_id' => $rosterId,
+                'description' => 'Batch updated ' . $totalUpdates . ' assignment(s) for ' . count($validated['assignments']) . ' employee(s)',
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Assignments updated successfully',
+                'data' => [
+                    'roster_id' => $rosterId,
+                    'total_assignments' => count($validated['assignments']),
+                    'total_updates' => $totalUpdates,
+                    'updated_days' => $allUpdatedDays,
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to batch update assignments',
                 'error' => $e->getMessage(),
             ], 500);
         }

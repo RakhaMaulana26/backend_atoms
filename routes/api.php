@@ -75,6 +75,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{roster_id}/days/{day_id}/assignments', [RosterController::class, 'storeAssignments']);
         Route::put('/{roster_id}/days/{day_id}/assignments', [RosterController::class, 'updateAssignments']);
         Route::delete('/{roster_id}/days/{day_id}/assignments/{assignment_id}', [RosterController::class, 'deleteAssignment']);
+        
+        // Quick update assignment (simplified endpoint)
+        Route::post('/{roster_id}/assignments/quick-update', [RosterController::class, 'quickUpdateAssignment']);
+        
+        // Batch update multiple employees and dates at once
+        Route::post('/{roster_id}/assignments/batch-update', [RosterController::class, 'batchUpdateAssignments']);
     });
 
     // =======================================

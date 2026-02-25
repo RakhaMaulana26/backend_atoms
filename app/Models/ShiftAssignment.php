@@ -15,6 +15,8 @@ class ShiftAssignment extends Model
         'roster_day_id',
         'shift_id',
         'employee_id',
+        'notes',
+        'span_days',
     ];
 
     public function rosterDay()

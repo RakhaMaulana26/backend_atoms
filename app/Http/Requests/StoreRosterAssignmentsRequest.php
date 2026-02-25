@@ -25,6 +25,7 @@ class StoreRosterAssignmentsRequest extends FormRequest
             'shift_assignments' => 'sometimes|array',
             'shift_assignments.*.employee_id' => 'required|exists:employees,id',
             'shift_assignments.*.shift_id' => 'required|exists:shifts,id',
+            'shift_assignments.*.notes' => 'nullable|string|max:500',
             'manager_duties' => 'sometimes|array',
             'manager_duties.*.employee_id' => 'required|exists:employees,id',
             'manager_duties.*.duty_type' => 'required|string|in:Manager Teknik,General Manager',

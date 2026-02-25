@@ -35,9 +35,36 @@ class RosterImportController extends Controller
         'CT' => 'cuti_tahunan',
         'DL' => 'dinas_luar',
         'Stby' => 'standby',
+        'SC' => 'standby',
+        'S/P' => 'standby_pagi',
+        'S/S' => 'standby_siang',
+        'S/M' => 'standby_malam',
         '-' => 'lepas_malam',
         'TB' => 'tugas_belajar',
         'CUTI TAHUNAN' => 'cuti_tahunan',
+        'CUTI DOKTER' => 'cuti_sakit',
+        'CUTI SAKIT' => 'cuti_sakit',
+    ];
+    
+    /**
+     * Map shift codes to user-friendly display names
+     */
+    private $shiftDisplayNames = [
+        'P' => 'Pagi',
+        'S' => 'Siang',
+        'M' => 'Malam',
+        'L' => 'Libur',
+        'OH' => 'Office Hour',
+        'CS' => 'Cuti Sakit',
+        'CT' => 'Cuti Tahunan',
+        'DL' => 'Dinas Luar',
+        'Stby' => 'Standby',
+        'SC' => 'Standby On Call',
+        'S/P' => 'Standby Pagi',
+        'S/S' => 'Standby Siang',
+        'S/M' => 'Standby Malam',
+        '-' => 'Lepas Malam',
+        'TB' => 'Tugas Belajar',
     ];
 
     /**
@@ -138,20 +165,25 @@ class RosterImportController extends Controller
 
                 $stats['employees_processed']++;
 
-                // Create shift assignments for each day
-                foreach ($empSchedule['schedule'] as $dayNum => $shiftCode) {
+                // Create shift assignments for each day (store individually, frontend will auto-merge)
+                foreach ($empSchedule['schedule'] as $dayNum => $shiftData) {
                     if (!isset($rosterDays[$dayNum])) {
                         continue;
                     }
 
+                    // Handle both string format and array format (for backward compatibility)
+                    $shiftCode = is_array($shiftData) ? $shiftData['code'] : $shiftData;
+                    // Always set span_days = 1 (frontend will auto-merge consecutive cells)
+                    $spanDays = 1;
+
                     $rosterDay = $rosterDays[$dayNum];
-                    $shiftName = $this->mapShiftCode($shiftCode !== null ? (string) $shiftCode : null);
+                    $shiftMapping = $this->mapShiftCodeWithNotes($shiftCode !== null ? (string) $shiftCode : null);
                     
-                    if (!$shiftName) {
-                        continue; // Skip unknown shift codes
+                    if (!$shiftMapping['shift']) {
+                        continue; // Skip empty cells
                     }
 
-                    $shift = Shift::where('name', $shiftName)->first();
+                    $shift = Shift::where('name', $shiftMapping['shift'])->first();
                     if (!$shift) {
                         continue;
                     }
@@ -164,6 +196,8 @@ class RosterImportController extends Controller
                     if ($existing) {
                         // Update existing assignment
                         $existing->shift_id = $shift->id;
+                        $existing->notes = $shiftMapping['notes'];
+                        $existing->span_days = $spanDays;
                         $existing->save();
                         $stats['assignments_skipped']++;
                     } else {
@@ -172,6 +206,8 @@ class RosterImportController extends Controller
                             'roster_day_id' => $rosterDay->id,
                             'employee_id' => $employee->id,
                             'shift_id' => $shift->id,
+                            'notes' => $shiftMapping['notes'],
+                            'span_days' => $spanDays,
                         ]);
                         $stats['assignments_created']++;
                     }
@@ -193,10 +229,31 @@ class RosterImportController extends Controller
             // Clear roster cache
             CacheHelper::clearRosterCache();
 
+            // Load relationships for frontend cache
+            $rosterPeriod->load([
+                'rosterDays.shiftAssignments.shift',
+                'rosterDays.shiftAssignments.employee.user',
+            ]);
+
+            // Include all employees (for roster view initialization)
+            $allEmployees = \App\Models\Employee::with('user')
+                ->where('is_active', true)
+                ->whereNotNull('group_number')
+                ->where('group_number', '>', 0)
+                ->orderBy('employee_type')
+                ->orderBy('group_number')
+                ->orderBy('user_id')
+                ->get();
+
+            // Include all shifts (for dropdown options)
+            $allShifts = \App\Models\Shift::orderBy('id')->get();
+
             return response()->json([
                 'message' => 'Roster imported successfully',
                 'data' => [
                     'roster_period' => $rosterPeriod,
+                    'all_employees' => $allEmployees,
+                    'all_shifts' => $allShifts,
                     'month' => $month,
                     'year' => $year,
                     'stats' => $stats,
@@ -276,8 +333,18 @@ class RosterImportController extends Controller
             ];
 
             foreach ($scheduleColumns as $col => $day) {
-                $shiftCode = $sheet->getCell($col . $row)->getValue();
+                $cellCoordinate = $col . $row;
+                $shiftCode = $sheet->getCell($cellCoordinate)->getValue();
+                
+                // If cell is empty, check if it's part of a merged range
+                if (($shiftCode === null || $shiftCode === '') && $this->isPartOfMergedCell($sheet, $cellCoordinate)) {
+                    // Get the value from the merged range's top-left cell
+                    $shiftCode = $this->getMergedCellValue($sheet, $cellCoordinate);
+                }
+                
                 if ($shiftCode !== null && $shiftCode !== '') {
+                    // Store each cell individually (no span_days)
+                    // Frontend will auto-merge consecutive identical cells
                     $employee['schedule'][$day] = trim($shiftCode);
                 }
             }
@@ -328,7 +395,8 @@ class RosterImportController extends Controller
     }
 
     /**
-     * Map shift code from Excel to database shift name
+     * Map shift code from Excel to database shift name and notes
+     * Returns ['shift' => shift_name, 'notes' => original_text]
      */
     private function mapShiftCode(?string $code): ?string
     {
@@ -337,27 +405,131 @@ class RosterImportController extends Controller
             return null;
         }
         
-        $code = trim(strtoupper($code));
-        
-        // Direct mapping
-        if (isset($this->shiftMapping[$code])) {
-            return $this->shiftMapping[$code];
-        }
-
-        // Handle variations
+        $code = trim($code);
         $codeUpper = strtoupper($code);
+        
+        // Direct mapping - case insensitive
         foreach ($this->shiftMapping as $key => $value) {
             if (strtoupper($key) === $codeUpper) {
                 return $value;
             }
         }
 
-        // Handle special cases
-        if (str_contains($code, 'CUTI')) {
+        // Handle special cases and variations
+        if (str_contains($codeUpper, 'CUTI TAHUNAN') || $codeUpper === 'CT') {
             return 'cuti_tahunan';
         }
+        if (str_contains($codeUpper, 'CUTI SAKIT') || str_contains($codeUpper, 'CUTI DOKTER') || $codeUpper === 'CS') {
+            return 'cuti_sakit';
+        }
+        if (str_contains($codeUpper, 'DINAS LUAR') || $codeUpper === 'DL') {
+            return 'dinas_luar';
+        }
+        if (str_contains($codeUpper, 'OFFICE HOUR') || $codeUpper === 'OH') {
+            return 'office_hour';
+        }
+        if (str_contains($codeUpper, 'TUGAS BELAJAR') || $codeUpper === 'TB') {
+            return 'tugas_belajar';
+        }
+        if (str_contains($codeUpper, 'STANDBY') || str_contains($codeUpper, 'STBY')) {
+            return 'standby';
+        }
+        if (str_contains($codeUpper, 'LEPAS')) {
+            return 'lepas_malam';
+        }
+        if (str_contains($codeUpper, 'LIBUR')) {
+            return 'libur';
+        }
 
+        // If code doesn't match any known shift, return null
+        // The caller should check for null and handle custom notes
         return null;
+    }
+
+    /**
+     * Map shift code from Excel and extract notes if code is not a standard shift
+     * Returns ['shift' => shift_name, 'notes' => custom_text_or_null]
+     */
+    private function mapShiftCodeWithNotes(?string $code): array
+    {
+        if ($code === null || trim($code) === '') {
+            return ['shift' => null, 'notes' => null];
+        }
+
+        $originalCode = trim($code);
+        $upperCode = strtoupper($originalCode);
+        $shiftName = $this->mapShiftCode($code);
+
+        if ($shiftName) {
+            // ALWAYS save the original Excel text as notes
+            // This ensures whatever is written in Excel appears exactly in the table
+            return ['shift' => $shiftName, 'notes' => $originalCode];
+        }
+
+        // Code doesn't match any known shift
+        // Use a generic shift and store original text as notes
+        return ['shift' => 'libur', 'notes' => $originalCode];
+    }
+
+    /**
+     * Auto-merge consecutive days with the same shift code and notes
+     * Returns modified schedule with span_days set for merged entries
+     */
+    private function autoMergeConsecutiveDays(array $schedule): array
+    {
+        if (empty($schedule)) {
+            return $schedule;
+        }
+
+        // Sort by day number
+        ksort($schedule);
+        
+        $result = [];
+        $skipUntil = 0;
+        
+        foreach ($schedule as $dayNum => $shiftData) {
+            // Skip if this day was already merged into a previous entry
+            if ($dayNum <= $skipUntil) {
+                continue;
+            }
+            
+            $currentCode = is_array($shiftData) ? $shiftData['code'] : $shiftData;
+            $currentSpan = is_array($shiftData) && isset($shiftData['span']) ? $shiftData['span'] : 1;
+            
+            // If already merged from Excel, keep it as is
+            if ($currentSpan > 1) {
+                $result[$dayNum] = $shiftData;
+                $skipUntil = $dayNum + $currentSpan - 1;
+                continue;
+            }
+            
+            // Look ahead for consecutive days with same code
+            $consecutiveDays = 1;
+            $nextDay = $dayNum + 1;
+            
+            while (isset($schedule[$nextDay])) {
+                $nextCode = is_array($schedule[$nextDay]) ? $schedule[$nextDay]['code'] : $schedule[$nextDay];
+                $nextSpan = is_array($schedule[$nextDay]) && isset($schedule[$nextDay]['span']) ? $schedule[$nextDay]['span'] : 1;
+                
+                // Stop if next day has different code or is already merged
+                if ($nextCode !== $currentCode || $nextSpan > 1) {
+                    break;
+                }
+                
+                $consecutiveDays++;
+                $nextDay++;
+            }
+            
+            // Store the entry with its span
+            $result[$dayNum] = [
+                'code' => $currentCode,
+                'span' => $consecutiveDays,
+            ];
+            
+            $skipUntil = $dayNum + $consecutiveDays - 1;
+        }
+        
+        return $result;
     }
 
     /**
@@ -432,6 +604,103 @@ class RosterImportController extends Controller
         foreach ($shifts as $shiftName) {
             Shift::firstOrCreate(['name' => $shiftName]);
         }
+    }
+
+    /**
+     * Get the span (number of columns) for a merged cell
+     * Returns 1 if not merged, or number of days spanned if merged
+     */
+    private function getMergedCellSpan($sheet, string $cellCoordinate, array $scheduleColumns): int
+    {
+        $mergeRanges = $sheet->getMergeCells();
+        
+        foreach ($mergeRanges as $mergeRange) {
+            // Parse merge range (e.g., "E5:H5")
+            [$rangeStart, $rangeEnd] = explode(':', $mergeRange);
+            
+            // Check if current cell is the start of this merge range
+            if ($cellCoordinate === $rangeStart) {
+                $startCol = preg_replace('/[0-9]+/', '', $rangeStart);
+                $endCol = preg_replace('/[0-9]+/', '', $rangeEnd);
+                
+                // Count how many day columns are spanned
+                $startDay = $scheduleColumns[$startCol] ?? null;
+                $endDay = $scheduleColumns[$endCol] ?? null;
+                
+                if ($startDay !== null && $endDay !== null) {
+                    return $endDay - $startDay + 1;
+                }
+            }
+        }
+        
+        return 1; // Not merged
+    }
+
+    /**
+     * Check if a cell is part of a merged cell range
+     */
+    private function isPartOfMergedCell($sheet, string $cellCoordinate): bool
+    {
+        $mergeRanges = $sheet->getMergeCells();
+        
+        foreach ($mergeRanges as $mergeRange) {
+            if ($this->isCellInRange($cellCoordinate, $mergeRange)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    /**
+     * Get the value from the top-left cell of a merged range
+     */
+    private function getMergedCellValue($sheet, string $cellCoordinate): ?string
+    {
+        $mergeRanges = $sheet->getMergeCells();
+        
+        foreach ($mergeRanges as $mergeRange) {
+            if ($this->isCellInRange($cellCoordinate, $mergeRange)) {
+                // Get the top-left cell of the merged range
+                [$rangeStart, $rangeEnd] = explode(':', $mergeRange);
+                return $sheet->getCell($rangeStart)->getValue();
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Check if a cell coordinate is within a range (e.g., "E5" in "E5:H5")
+     */
+    private function isCellInRange(string $cellCoordinate, string $range): bool
+    {
+        [$rangeStart, $rangeEnd] = explode(':', $range);
+        
+        // Extract column and row from coordinates
+        preg_match('/([A-Z]+)(\d+)/', $cellCoordinate, $cellMatches);
+        preg_match('/([A-Z]+)(\d+)/', $rangeStart, $startMatches);
+        preg_match('/([A-Z]+)(\d+)/', $rangeEnd, $endMatches);
+        
+        if (count($cellMatches) < 3 || count($startMatches) < 3 || count($endMatches) < 3) {
+            return false;
+        }
+        
+        $cellCol = $cellMatches[1];
+        $cellRow = (int) $cellMatches[2];
+        $startCol = $startMatches[1];
+        $startRow = (int) $startMatches[2];
+        $endCol = $endMatches[1];
+        $endRow = (int) $endMatches[2];
+        
+        // Use PhpSpreadsheet's coordinate helper to compare columns
+        $cellColIndex = Coordinate::columnIndexFromString($cellCol);
+        $startColIndex = Coordinate::columnIndexFromString($startCol);
+        $endColIndex = Coordinate::columnIndexFromString($endCol);
+        
+        // Check if cell is within the range
+        return $cellColIndex >= $startColIndex && $cellColIndex <= $endColIndex
+            && $cellRow >= $startRow && $cellRow <= $endRow;
     }
 
     /**
@@ -681,19 +950,25 @@ class RosterImportController extends Controller
 
                 $stats['employees_processed']++;
 
-                foreach ($empSchedule['schedule'] as $dayNum => $shiftCode) {
+                // Store each day individually (frontend will auto-merge)
+                foreach ($empSchedule['schedule'] as $dayNum => $shiftData) {
                     if (!isset($rosterDays[$dayNum])) {
                         continue;
                     }
 
+                    // Handle both string format and array format (for backward compatibility)
+                    $shiftCode = is_array($shiftData) ? $shiftData['code'] : $shiftData;
+                    // Always set span_days = 1 (frontend will auto-merge consecutive cells)
+                    $spanDays = 1;
+
                     $rosterDay = $rosterDays[$dayNum];
-                    $shiftName = $this->mapShiftCode($shiftCode !== null ? (string) $shiftCode : null);
+                    $shiftMapping = $this->mapShiftCodeWithNotes($shiftCode !== null ? (string) $shiftCode : null);
                     
-                    if (!$shiftName) {
+                    if (!$shiftMapping['shift']) {
                         continue;
                     }
 
-                    $shift = Shift::where('name', $shiftName)->first();
+                    $shift = Shift::where('name', $shiftMapping['shift'])->first();
                     if (!$shift) {
                         continue;
                     }
@@ -704,6 +979,8 @@ class RosterImportController extends Controller
 
                     if ($existing) {
                         $existing->shift_id = $shift->id;
+                        $existing->notes = $shiftMapping['notes'];
+                        $existing->span_days = $spanDays;
                         $existing->save();
                         $stats['assignments_skipped']++;
                     } else {
@@ -711,6 +988,8 @@ class RosterImportController extends Controller
                             'roster_day_id' => $rosterDay->id,
                             'employee_id' => $employee->id,
                             'shift_id' => $shift->id,
+                            'notes' => $shiftMapping['notes'],
+                            'span_days' => $spanDays,
                         ]);
                         $stats['assignments_created']++;
                     }
@@ -731,10 +1010,16 @@ class RosterImportController extends Controller
 
             CacheHelper::clearRosterCache();
 
+            // Load relationships for frontend cache
+            $rosterPeriod->load([
+                'rosterDays.shiftAssignments.shift',
+                'rosterDays.shiftAssignments.employee.user',
+            ]);
+
             return response()->json([
                 'message' => 'Roster imported successfully from Google Spreadsheet',
                 'data' => [
-                    'roster_period' => $rosterPeriod->fresh(),
+                    'roster_period' => $rosterPeriod,
                     'month' => $month,
                     'year' => $year,
                     'stats' => $stats,
@@ -918,14 +1203,20 @@ class RosterImportController extends Controller
 
                 $stats['employees_processed']++;
 
-                foreach ($empSchedule['schedule'] as $dayNum => $shiftCode) {
+                // Store each day individually (frontend will auto-merge)
+                foreach ($empSchedule['schedule'] as $dayNum => $shiftData) {
                     if (!isset($rosterDays[$dayNum])) continue;
 
-                    $rosterDay = $rosterDays[$dayNum];
-                    $shiftName = $this->mapShiftCode($shiftCode !== null ? (string) $shiftCode : null);
-                    if (!$shiftName) continue;
+                    // Handle both string format and array format (for backward compatibility)
+                    $shiftCode = is_array($shiftData) ? $shiftData['code'] : $shiftData;
+                    // Always set span_days = 1 (frontend will auto-merge consecutive cells)
+                    $spanDays = 1;
 
-                    $shift = Shift::where('name', $shiftName)->first();
+                    $rosterDay = $rosterDays[$dayNum];
+                    $shiftMapping = $this->mapShiftCodeWithNotes($shiftCode !== null ? (string) $shiftCode : null);
+                    if (!$shiftMapping['shift']) continue;
+
+                    $shift = Shift::where('name', $shiftMapping['shift'])->first();
                     if (!$shift) continue;
 
                     $existing = ShiftAssignment::where('roster_day_id', $rosterDay->id)
@@ -933,8 +1224,10 @@ class RosterImportController extends Controller
                         ->first();
 
                     if ($existing) {
-                        if ($existing->shift_id !== $shift->id) {
+                        if ($existing->shift_id !== $shift->id || $existing->notes !== $shiftMapping['notes'] || $existing->span_days !== $spanDays) {
                             $existing->shift_id = $shift->id;
+                            $existing->notes = $shiftMapping['notes'];
+                            $existing->span_days = $spanDays;
                             $existing->save();
                             $stats['assignments_updated']++;
                         }
@@ -943,6 +1236,8 @@ class RosterImportController extends Controller
                             'roster_day_id' => $rosterDay->id,
                             'employee_id' => $employee->id,
                             'shift_id' => $shift->id,
+                            'notes' => $shiftMapping['notes'],
+                            'span_days' => $spanDays,
                         ]);
                         $stats['assignments_created']++;
                     }
