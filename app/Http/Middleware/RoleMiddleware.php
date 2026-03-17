@@ -8,6 +8,16 @@ use Symfony\Component\HttpFoundation\Response;
 
 class RoleMiddleware
 {
+    private function normalizeRole(?string $role): string
+    {
+        if (!$role) {
+            return '';
+        }
+
+        $collapsed = preg_replace('/\s+/', ' ', trim($role));
+        return mb_strtolower($collapsed ?? '');
+    }
+
     /**
      * Handle an incoming request.
      *
@@ -21,7 +31,10 @@ class RoleMiddleware
             ], 401);
         }
 
-        if (!in_array($request->user()->role, $roles)) {
+        $userRole = $this->normalizeRole($request->user()->role);
+        $allowedRoles = array_map(fn ($role) => $this->normalizeRole($role), $roles);
+
+        if (!in_array($userRole, $allowedRoles, true)) {
             return response()->json([
                 'message' => 'Unauthorized. Required role: ' . implode(', ', $roles)
             ], 403);

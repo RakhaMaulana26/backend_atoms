@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\EmployeeScheduleController;
+use App\Http\Controllers\Api\LeaveRequestController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\RosterController;
 use App\Http\Controllers\Api\RosterImportController;
@@ -93,6 +94,25 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{id}/approve-target', [ShiftRequestController::class, 'approveByTarget']);
         Route::post('/{id}/approve-manager', [ShiftRequestController::class, 'approveByManager'])->middleware('role:' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER);
         Route::post('/{id}/reject', [ShiftRequestController::class, 'reject']);
+    });
+
+    // =======================================
+    // LEAVE REQUEST
+    // =======================================
+    Route::prefix('leave-requests')->group(function () {
+        // Employee routes - any authenticated user can access
+        Route::get('/my-requests', [LeaveRequestController::class, 'myRequests']);
+        Route::get('/statistics', [LeaveRequestController::class, 'statistics']);
+        Route::post('/', [LeaveRequestController::class, 'store']);
+        Route::get('/{id}/document', [LeaveRequestController::class, 'document']);
+        Route::get('/{id}', [LeaveRequestController::class, 'show']);
+        Route::delete('/{id}', [LeaveRequestController::class, 'destroy']);
+        
+        // Manager routes - only managers can approve/reject and view all requests
+        Route::middleware('role:' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER)->group(function () {
+            Route::get('/', [LeaveRequestController::class, 'index']);
+            Route::post('/{id}/update-status', [LeaveRequestController::class, 'updateStatus']);
+        });
     });
 
     // =======================================
