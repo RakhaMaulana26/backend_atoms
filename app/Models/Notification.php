@@ -18,6 +18,8 @@ class Notification extends Model
         'is_read',
         'is_starred',
         'type',
+        'category',
+        'reference_id',
         'email_sent',
         'email_sent_at',
     ];

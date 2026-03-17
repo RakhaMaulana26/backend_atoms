@@ -17,8 +17,8 @@ class QuickUpdateAssignmentRequest extends FormRequest
             'employee_id' => 'required|exists:employees,id',
             'work_dates' => 'required|array|min:1',
             'work_dates.*' => 'required|date_format:Y-m-d',
-            'shift' => 'required|string', // Can be shift name or shift_id
-            'notes' => 'nullable|string|max:255',
+            'notes' => 'required|string|max:50', // Primary identifier (P, S, M, L, etc.)
+            'shift_id' => 'nullable|exists:shifts,id', // Optional - auto-resolved from notes
         ];
     }
 
@@ -31,9 +31,9 @@ class QuickUpdateAssignmentRequest extends FormRequest
             'work_dates.array' => 'Tanggal kerja harus berupa array',
             'work_dates.min' => 'Minimal harus ada 1 tanggal kerja',
             'work_dates.*.date_format' => 'Format tanggal harus Y-m-d (contoh: 2026-02-18)',
-            'shift.required' => 'Shift wajib diisi',
-            'shift.string' => 'Shift harus berupa string',
-            'notes.max' => 'Catatan maksimal 255 karakter',
+            'notes.required' => 'Kode shift wajib diisi (P, S, M, L, dll)',
+            'notes.string' => 'Kode shift harus berupa string',
+            'notes.max' => 'Kode shift maksimal 50 karakter',
         ];
     }
 }
