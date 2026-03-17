@@ -20,6 +20,66 @@ class NotificationController extends Controller
     }
 
     /**
+     * GET /notifications/all
+     * Returns all notifications with counts for each category
+     * This allows frontend to filter client-side with a single request
+     */
+    public function all(Request $request)
+    {
+        $user = Auth::user();
+        
+        // Get all user's notifications (both received and sent, including trashed)
+        $allNotifications = Notification::with('sender:id,name,email')
+            ->withTrashed()
+            ->where(function($q) use ($user) {
+                $q->where('user_id', $user->id)
+                  ->orWhere('sender_id', $user->id);
+            })
+            ->latest()
+            ->get();
+
+        // Categorize notifications
+        $inbox = $allNotifications->filter(function($n) use ($user) {
+            return $n->user_id === $user->id 
+                && $n->type === 'inbox' 
+                && $n->deleted_at === null;
+        })->values();
+
+        $starred = $allNotifications->filter(function($n) {
+            return $n->is_starred && $n->deleted_at === null;
+        })->values();
+
+        $sent = $allNotifications->filter(function($n) use ($user) {
+            return $n->sender_id === $user->id 
+                && $n->type === 'sent' 
+                && $n->deleted_at === null;
+        })->values();
+
+        $trash = $allNotifications->filter(function($n) {
+            return $n->deleted_at !== null;
+        })->values();
+
+        // Count unread for badge
+        $unreadInbox = $inbox->where('is_read', false)->count();
+
+        return response()->json([
+            'data' => [
+                'inbox' => $inbox,
+                'starred' => $starred,
+                'sent' => $sent,
+                'trash' => $trash,
+            ],
+            'stats' => [
+                'inbox' => $inbox->count(),
+                'starred' => $starred->count(),
+                'sent' => $sent->count(),
+                'trash' => $trash->count(),
+                'unread' => $unreadInbox,
+            ],
+        ]);
+    }
+
+    /**
      * GET /notifications
      * Filter by category: inbox, starred, sent, trash
      */

@@ -19,6 +19,8 @@ class Notification extends Model
         'is_starred',
         'type',
         'category',
+        'reference_id',
+        'category',
         'data',
         'email_sent',
         'email_sent_at',

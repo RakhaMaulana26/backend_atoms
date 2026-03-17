@@ -52,6 +52,13 @@ class DatabaseSeeder extends Seeder
         ]);
 
         // ================================
+        // GENERAL MANAGER (1 employee)
+        // ================================
+        $generalManagers = [
+            ['name' => 'General Manager', 'kelas' => 17, 'jabatan' => 'General Manager', 'group' => null],
+        ];
+
+        // ================================
         // TEKNIK MT & PT MT (5 employees)
         // ================================
         $teknikMT = [
@@ -130,6 +137,11 @@ class DatabaseSeeder extends Seeder
         ];
 
         // Create all employees
+        // General Manager
+        foreach ($generalManagers as $emp) {
+            $this->createEmployee($emp, 'general_manager');
+        }
+
         // Teknik MT - all are Manager Teknik
         foreach ($teknikMT as $emp) {
             $this->createEmployee($emp, 'manager_teknik');
@@ -147,10 +159,11 @@ class DatabaseSeeder extends Seeder
 
         $this->command->info('✅ Admin user created: admin@airnav.com / password');
         $this->command->info('✅ Airnav employees created:');
-        $this->command->info('   - Teknik MT & PT MT: 5 employees (Manager Teknik)');
+        $this->command->info('   - General Manager: 1 employee (General Manager) → user1@airnav.com');
+        $this->command->info('   - Teknik MT & PT MT: 5 employees (Manager Teknik) → user2–user6@airnav.com');
         $this->command->info('   - CNSD Telekomunikasi: 29 employees (CNS)');
         $this->command->info('   - TFP Fasilitas Penunjang: 16 employees (Support)');
-        $this->command->info('   Total: 50 employees + 1 admin = 51 users');
+        $this->command->info('   Total: 52 employees + 1 admin = 53 users');
         $this->command->info('✅ All users password: password');
         $this->command->info('✅ Email format: user1@airnav.com, user2@airnav.com, ...');
     }
@@ -163,6 +176,10 @@ class DatabaseSeeder extends Seeder
         
         // Set role and employee type based on parameter
         switch ($type) {
+            case 'general_manager':
+                $role = User::ROLE_GENERAL_MANAGER;
+                $employeeType = 'General Manager';
+                break;
             case 'manager_teknik':
                 $role = User::ROLE_MANAGER_TEKNIK;
                 $employeeType = 'Manager Teknik';

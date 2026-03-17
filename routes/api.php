@@ -68,6 +68,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/{id}', [RosterController::class, 'update']);
         Route::delete('/{id}', [RosterController::class, 'destroy']);
         Route::post('/{id}/publish', [RosterController::class, 'publish']);
+        Route::post('/{id}/unpublish', [RosterController::class, 'unpublish']);
         Route::post('/{id}/sync', [RosterImportController::class, 'syncFromSpreadsheet']);
         Route::post('/{id}/push', [RosterImportController::class, 'pushToSpreadsheet']);
         Route::put('/{id}/spreadsheet-url', [RosterImportController::class, 'updateSpreadsheetUrl']);
@@ -85,15 +86,23 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // =======================================
-    // SHIFT REQUEST
+    // SHIFT REQUEST / SWAP SHIFT
     // =======================================
     Route::prefix('shift-requests')->group(function () {
+        // List & Read
+        Route::get('/', [ShiftRequestController::class, 'index']);
         Route::get('/my-shifts', [ShiftRequestController::class, 'getMyShifts']);
         Route::get('/available-partners', [ShiftRequestController::class, 'getAvailablePartners']);
+        Route::get('/pending-count', [ShiftRequestController::class, 'getPendingCount']);
+        Route::get('/manager-for-shift', [ShiftRequestController::class, 'getManagerForShift']);
+        Route::get('/{id}', [ShiftRequestController::class, 'show']);
+        
+        // Create & Actions
         Route::post('/', [ShiftRequestController::class, 'store']);
         Route::post('/{id}/approve-target', [ShiftRequestController::class, 'approveByTarget']);
         Route::post('/{id}/approve-manager', [ShiftRequestController::class, 'approveByManager'])->middleware('role:' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER);
         Route::post('/{id}/reject', [ShiftRequestController::class, 'reject']);
+        Route::post('/{id}/cancel', [ShiftRequestController::class, 'cancel']);
     });
 
     // =======================================
@@ -120,6 +129,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // =======================================
     Route::prefix('notifications')->group(function () {
         Route::get('/', [NotificationController::class, 'index']);
+        Route::get('/all', [NotificationController::class, 'all']); // Single endpoint for all categories
         Route::post('/send', [NotificationController::class, 'send']);
         Route::post('/{id}/read', [NotificationController::class, 'markAsRead']);
         Route::post('/{id}/star', [NotificationController::class, 'toggleStar']);
