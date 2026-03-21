@@ -20,7 +20,6 @@ class Notification extends Model
         'type',
         'category',
         'reference_id',
-        'category',
         'data',
         'email_sent',
         'email_sent_at',

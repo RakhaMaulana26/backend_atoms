@@ -11,9 +11,21 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('notifications', function (Blueprint $table) {
-            $table->string('category')->nullable()->after('type');
-            $table->text('data')->nullable()->after('category');
+        $hasCategory = Schema::hasColumn('notifications', 'category');
+        $hasData = Schema::hasColumn('notifications', 'data');
+
+        if ($hasCategory && $hasData) {
+            return;
+        }
+
+        Schema::table('notifications', function (Blueprint $table) use ($hasCategory, $hasData) {
+            if (!$hasCategory) {
+                $table->string('category')->nullable()->after('type');
+            }
+
+            if (!$hasData) {
+                $table->text('data')->nullable()->after('category');
+            }
         });
     }
 
@@ -22,8 +34,10 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::table('notifications', function (Blueprint $table) {
-            $table->dropColumn(['category', 'data']);
-        });
+        if (Schema::hasColumn('notifications', 'data')) {
+            Schema::table('notifications', function (Blueprint $table) {
+                $table->dropColumn('data');
+            });
+        }
     }
 };

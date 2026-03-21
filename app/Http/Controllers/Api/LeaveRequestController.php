@@ -6,18 +6,22 @@ use App\Helpers\CacheHelper;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreLeaveRequestRequest;
 use App\Http\Requests\UpdateLeaveRequestStatusRequest;
-use App\Mail\LeaveRequestSubmittedMail;
 use App\Mail\LeaveRequestStatusChangedMail;
+use App\Mail\LeaveRequestSubmittedMail;
 use App\Models\ActivityLog;
 use App\Models\Employee;
 use App\Models\LeaveRequest;
+use App\Models\LeaveRequestApproval;
+use App\Models\ManagerDuty;
 use App\Models\Notification;
 use App\Models\RosterDay;
 use App\Models\Shift;
 use App\Models\ShiftAssignment;
 use App\Models\User;
+use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -47,38 +51,57 @@ class LeaveRequestController extends Controller
         return in_array($normalizedRole, $managerRoles, true);
     }
 
+    private function isManagerTeknikRole(?string $role): bool
+    {
+        return $this->normalizeRole($role) === $this->normalizeRole(User::ROLE_MANAGER_TEKNIK);
+    }
+
+    private function getLeaveRequestRelations(): array
+    {
+        return [
+            'employee.user',
+            'approvedByManager.user',
+            'approvals.managerEmployee.user',
+            'approvals.rosterDay.rosterPeriod',
+        ];
+    }
+
     /**
      * GET /leave-requests
      * Get all leave requests (for managers)
      */
     public function index(Request $request)
     {
-        $query = LeaveRequest::with(['employee.user', 'approvedByManager.user'])
+        $user = Auth::user();
+        $employee = $user?->employee;
+
+        $query = LeaveRequest::with($this->getLeaveRequestRelations())
             ->orderBy('created_at', 'desc');
 
-        // Filter by status
         if ($request->has('status')) {
             $query->where('status', $request->status);
         }
 
-        // Filter by request type
         if ($request->has('request_type')) {
             $query->where('request_type', $request->request_type);
         }
 
-        // Filter by date range
         if ($request->has('start_date') && $request->has('end_date')) {
             $query->dateRange($request->start_date, $request->end_date);
         }
 
-        // Filter by employee
         if ($request->has('employee_id')) {
             $query->byEmployee($request->employee_id);
         }
 
-        // Pagination
         $perPage = $request->get('per_page', 15);
         $leaveRequests = $query->paginate($perPage);
+
+        $leaveRequests->setCollection(
+            $leaveRequests->getCollection()->map(function (LeaveRequest $leaveRequest) use ($user, $employee) {
+                return $this->serializeLeaveRequest($leaveRequest, $user, $employee);
+            })
+        );
 
         return response()->json([
             'message' => 'Leave requests retrieved successfully',
@@ -92,7 +115,8 @@ class LeaveRequestController extends Controller
      */
     public function myRequests(Request $request)
     {
-        $employee = Auth::user()->employee;
+        $user = Auth::user();
+        $employee = $user->employee;
 
         if (!$employee) {
             return response()->json([
@@ -100,23 +124,26 @@ class LeaveRequestController extends Controller
             ], 403);
         }
 
-        $query = LeaveRequest::with(['approvedByManager.user'])
+        $query = LeaveRequest::with($this->getLeaveRequestRelations())
             ->where('employee_id', $employee->id)
             ->orderBy('created_at', 'desc');
 
-        // Filter by status
         if ($request->has('status')) {
             $query->where('status', $request->status);
         }
 
-        // Filter by request type
         if ($request->has('request_type')) {
             $query->where('request_type', $request->request_type);
         }
 
-        // Pagination
         $perPage = $request->get('per_page', 15);
         $leaveRequests = $query->paginate($perPage);
+
+        $leaveRequests->setCollection(
+            $leaveRequests->getCollection()->map(function (LeaveRequest $leaveRequest) use ($user, $employee) {
+                return $this->serializeLeaveRequest($leaveRequest, $user, $employee);
+            })
+        );
 
         return response()->json([
             'message' => 'Your leave requests retrieved successfully',
@@ -130,15 +157,13 @@ class LeaveRequestController extends Controller
      */
     public function show($id)
     {
-        $leaveRequest = LeaveRequest::with(['employee.user', 'approvedByManager.user'])
+        $leaveRequest = LeaveRequest::with($this->getLeaveRequestRelations())
             ->findOrFail($id);
 
         $employee = Auth::user()->employee;
         $user = Auth::user();
 
-        // Check authorization - employee can view their own, managers can view all
         if ($employee && $leaveRequest->employee_id !== $employee->id) {
-            // Check if user is a manager
             if (!$this->isManagerRole($user->role)) {
                 return response()->json([
                     'message' => 'Unauthorized to view this leave request',
@@ -148,7 +173,7 @@ class LeaveRequestController extends Controller
 
         return response()->json([
             'message' => 'Leave request retrieved successfully',
-            'data' => $leaveRequest,
+            'data' => $this->serializeLeaveRequest($leaveRequest, $user, $employee),
         ]);
     }
 
@@ -162,7 +187,6 @@ class LeaveRequestController extends Controller
         $employee = Auth::user()->employee;
         $user = Auth::user();
 
-        // Employee can only access their own document, managers can access all.
         if ($employee && $leaveRequest->employee_id !== $employee->id) {
             if (!$this->isManagerRole($user->role)) {
                 return response()->json([
@@ -238,7 +262,6 @@ class LeaveRequestController extends Controller
         try {
             $requiresDocument = $request->request_type !== LeaveRequest::TYPE_ANNUAL_LEAVE;
 
-            // Supporting document is optional for annual leave only.
             if ($requiresDocument && !$request->hasFile('document')) {
                 return response()->json([
                     'message' => 'Dokumen pendukung wajib di-upload untuk tipe permohonan ini',
@@ -260,7 +283,6 @@ class LeaveRequestController extends Controller
                     throw new \RuntimeException('Failed to read uploaded document content');
                 }
 
-                // Store document in DB as base64 to avoid filesystem dependency.
                 $documentContent = base64_encode($rawContent);
                 $documentMimeType = $file->getClientMimeType() ?: $file->getMimeType();
                 $documentOriginalName = $file->getClientOriginalName();
@@ -284,7 +306,6 @@ class LeaveRequestController extends Controller
 
             $leaveRequest = LeaveRequest::create($data);
 
-            // Check for overlapping leave requests
             if ($leaveRequest->hasOverlap($leaveRequest->id)) {
                 DB::rollBack();
                 return response()->json([
@@ -292,30 +313,51 @@ class LeaveRequestController extends Controller
                 ], 422);
             }
 
-            // Notify managers
+            $approvalBlueprints = $this->resolveApprovalBlueprints($leaveRequest);
+            if (!empty($approvalBlueprints['missing_dates'])) {
+                DB::rollBack();
+                return response()->json([
+                    'message' => 'Manager penanggung jawab belum tersedia untuk semua tanggal cuti.',
+                    'errors' => [
+                        'dates' => $approvalBlueprints['missing_dates'],
+                    ],
+                ], 422);
+            }
+
+            foreach ($approvalBlueprints['approvals'] as $approvalData) {
+                LeaveRequestApproval::create([
+                    'leave_request_id' => $leaveRequest->id,
+                    'roster_day_id' => $approvalData['roster_day_id'],
+                    'work_date' => $approvalData['work_date'],
+                    'employee_shift_notes' => $approvalData['employee_shift_notes'],
+                    'manager_employee_id' => $approvalData['manager_employee_id'],
+                    'status' => LeaveRequestApproval::STATUS_PENDING,
+                ]);
+            }
+
+            $leaveRequest->load($this->getLeaveRequestRelations());
+
             $this->notifyManagers($leaveRequest);
 
-            // Notify employee (submission confirmation)
-            $formattedStart = \Carbon\Carbon::parse($leaveRequest->start_date)->format('d M Y');
-            $formattedEnd   = \Carbon\Carbon::parse($leaveRequest->end_date)->format('d M Y');
+            $formattedStart = Carbon::parse($leaveRequest->start_date)->format('d M Y');
+            $formattedEnd = Carbon::parse($leaveRequest->end_date)->format('d M Y');
             Notification::create([
-                'user_id'  => $leaveRequest->employee->user_id,
-                'title'    => 'Permohonan Cuti Terkirim #' . $leaveRequest->id,
-                'message'  => 'Permohonan ' . $leaveRequest->request_type_name . ' Anda (' .
-                              $formattedStart . ' - ' . $formattedEnd .
-                              ') telah dikirim dan sedang menunggu persetujuan manager.',
-                'type'     => 'inbox',
+                'user_id' => $leaveRequest->employee->user_id,
+                'title' => 'Permohonan Cuti Terkirim #' . $leaveRequest->id,
+                'message' => 'Permohonan ' . $leaveRequest->request_type_name . ' Anda (' .
+                    $formattedStart . ' - ' . $formattedEnd .
+                    ') telah dikirim dan sedang menunggu persetujuan manager sesuai jadwal tiap tanggal.',
+                'type' => 'inbox',
                 'category' => 'leave_request',
-                'data'     => json_encode([
+                'data' => json_encode([
                     'leave_request_id' => $leaveRequest->id,
-                    'request_type'     => $leaveRequest->request_type,
-                    'status'           => 'pending',
-                    'start_date'       => \Carbon\Carbon::parse($leaveRequest->start_date)->format('Y-m-d'),
-                    'end_date'         => \Carbon\Carbon::parse($leaveRequest->end_date)->format('Y-m-d'),
+                    'request_type' => $leaveRequest->request_type,
+                    'status' => 'pending',
+                    'start_date' => Carbon::parse($leaveRequest->start_date)->format('Y-m-d'),
+                    'end_date' => Carbon::parse($leaveRequest->end_date)->format('Y-m-d'),
                 ]),
             ]);
 
-            // Log activity
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => 'create',
@@ -326,17 +368,13 @@ class LeaveRequestController extends Controller
 
             DB::commit();
 
-            // Load relationships
-            $leaveRequest->load(['employee.user', 'approvedByManager.user']);
-
             return response()->json([
                 'message' => 'Leave request created successfully',
-                'data' => $leaveRequest,
+                'data' => $this->serializeLeaveRequest($leaveRequest->fresh($this->getLeaveRequestRelations()), Auth::user(), $employee),
             ], 201);
         } catch (\Exception $e) {
             DB::rollBack();
-            
-            // Delete uploaded file if exists
+
             if (isset($data['document_path']) && Storage::disk('public')->exists($data['document_path'])) {
                 Storage::disk('public')->delete($data['document_path']);
             }
@@ -357,14 +395,19 @@ class LeaveRequestController extends Controller
         $user = Auth::user();
         $employee = $user->employee;
 
-        // Check if user is a manager
         if (!$this->isManagerRole($user->role)) {
             return response()->json([
                 'message' => 'Only managers can approve or reject leave requests',
             ], 403);
         }
 
-        $leaveRequest = LeaveRequest::with(['employee.user'])->findOrFail($id);
+        if (!$employee) {
+            return response()->json([
+                'message' => 'Data employee manager tidak ditemukan',
+            ], 403);
+        }
+
+        $leaveRequest = LeaveRequest::with($this->getLeaveRequestRelations())->findOrFail($id);
 
         if (!$leaveRequest->canBeApproved() && $request->status === LeaveRequest::STATUS_APPROVED) {
             return response()->json([
@@ -380,10 +423,33 @@ class LeaveRequestController extends Controller
 
         DB::beginTransaction();
         try {
+            $approvals = $this->ensurePendingApprovals($leaveRequest);
+            $assignedApprovals = $approvals->filter(function (LeaveRequestApproval $approval) use ($employee) {
+                return (int) $approval->manager_employee_id === (int) $employee->id;
+            })->values();
+
+            $pendingAssignedApprovals = $assignedApprovals->filter(function (LeaveRequestApproval $approval) {
+                return $approval->status === LeaveRequestApproval::STATUS_PENDING;
+            })->values();
+
+            if ($pendingAssignedApprovals->isEmpty()) {
+                if ($assignedApprovals->isNotEmpty()) {
+                    return response()->json([
+                        'message' => 'Anda sudah memproses semua tanggal cuti yang menjadi tanggung jawab Anda.',
+                    ], 400);
+                }
+
+                return response()->json([
+                    'message' => 'Anda bukan manager penanggung jawab untuk tanggal cuti pada permohonan ini.',
+                ], 403);
+            }
+
             $updatedAssignmentsCount = 0;
+            $shouldNotifyEmployee = false;
+            $responseMessage = 'Leave request status updated successfully';
+            $actionType = $request->status === LeaveRequest::STATUS_APPROVED ? 'approve_partial' : 'reject';
 
             if ($request->status === LeaveRequest::STATUS_APPROVED) {
-                // Check for overlapping leave requests before approving
                 if ($leaveRequest->hasOverlap($leaveRequest->id)) {
                     DB::rollBack();
                     return response()->json([
@@ -391,75 +457,92 @@ class LeaveRequestController extends Controller
                     ], 422);
                 }
 
-                $leaveRequest->approve($employee ? $employee->id : null, $request->approval_notes);
-                $updatedAssignmentsCount = $this->applyLeaveToSchedule($leaveRequest);
-                $notificationTitle   = 'Permohonan Cuti Disetujui ✓ #' . $leaveRequest->id;
-                $notificationMessage = 'Permohonan ' . $leaveRequest->request_type_name . ' Anda (' .
-                                      \Carbon\Carbon::parse($leaveRequest->start_date)->format('d M Y') . ' - ' .
-                                      \Carbon\Carbon::parse($leaveRequest->end_date)->format('d M Y') .
-                                      ') telah disetujui oleh manager.' .
-                                      ($request->approval_notes ? ' Catatan: ' . $request->approval_notes : '');
-                $actionType = 'approve';
+                $this->markApprovals($pendingAssignedApprovals, LeaveRequestApproval::STATUS_APPROVED, $request->approval_notes);
+                $leaveRequest->refresh()->load($this->getLeaveRequestRelations());
+
+                $hasRemainingApprovals = $leaveRequest->approvals()
+                    ->where('status', '!=', LeaveRequestApproval::STATUS_APPROVED)
+                    ->exists();
+
+                if (!$hasRemainingApprovals) {
+                    $leaveRequest->approve($employee->id, $request->approval_notes);
+                    $updatedAssignmentsCount = $this->applyLeaveToSchedule($leaveRequest->fresh());
+                    $notificationTitle = 'Permohonan Cuti Disetujui ? #' . $leaveRequest->id;
+                    $notificationMessage = 'Permohonan ' . $leaveRequest->request_type_name . ' Anda (' .
+                        Carbon::parse($leaveRequest->start_date)->format('d M Y') . ' - ' .
+                        Carbon::parse($leaveRequest->end_date)->format('d M Y') .
+                        ') telah disetujui oleh seluruh manager yang bertugas.' .
+                        ($request->approval_notes ? ' Catatan: ' . $request->approval_notes : '');
+                    $shouldNotifyEmployee = true;
+                    $responseMessage = 'Semua approval manager untuk permohonan cuti ini sudah lengkap.';
+                    $actionType = 'approve';
+                } else {
+                    $responseMessage = 'Persetujuan manager untuk tanggal yang menjadi tanggung jawab Anda sudah dicatat. Menunggu manager pada tanggal lainnya.';
+                }
             } else {
-                $leaveRequest->reject($employee ? $employee->id : null, $request->approval_notes);
-                $notificationTitle   = 'Permohonan Cuti Ditolak #' . $leaveRequest->id;
+                $this->markApprovals($pendingAssignedApprovals, LeaveRequestApproval::STATUS_REJECTED, $request->approval_notes);
+                $leaveRequest->reject($employee->id, $request->approval_notes);
+                $notificationTitle = 'Permohonan Cuti Ditolak #' . $leaveRequest->id;
                 $notificationMessage = 'Permohonan ' . $leaveRequest->request_type_name . ' Anda (' .
-                                      \Carbon\Carbon::parse($leaveRequest->start_date)->format('d M Y') . ' - ' .
-                                      \Carbon\Carbon::parse($leaveRequest->end_date)->format('d M Y') .
-                                      ') ditolak oleh manager.' .
-                                      ($request->approval_notes ? ' Alasan: ' . $request->approval_notes : '');
-                $actionType = 'reject';
+                    Carbon::parse($leaveRequest->start_date)->format('d M Y') . ' - ' .
+                    Carbon::parse($leaveRequest->end_date)->format('d M Y') .
+                    ') ditolak oleh manager yang bertugas.' .
+                    ($request->approval_notes ? ' Alasan: ' . $request->approval_notes : '');
+                $shouldNotifyEmployee = true;
+                $responseMessage = 'Permohonan cuti ditolak.';
             }
 
-            // Notify employee
-            Notification::create([
-                'user_id'  => $leaveRequest->employee->user_id,
-                'sender_id' => Auth::id(),
-                'title'    => $notificationTitle,
-                'message'  => $notificationMessage,
-                'type'     => 'inbox',
-                'category' => 'leave_request',
-                'data'     => json_encode([
-                    'leave_request_id' => $leaveRequest->id,
-                    'request_type'     => $leaveRequest->request_type,
-                    'status'           => $request->status,
-                    'start_date'       => \Carbon\Carbon::parse($leaveRequest->start_date)->format('Y-m-d'),
-                    'end_date'         => \Carbon\Carbon::parse($leaveRequest->end_date)->format('Y-m-d'),
-                ]),
-            ]);
+            $leaveRequest->refresh()->load($this->getLeaveRequestRelations());
 
-            // Send email notification to employee
-            try {
-                Mail::to($leaveRequest->employee->user->email)->send(
-                    new LeaveRequestStatusChangedMail($leaveRequest, $leaveRequest->employee->user->name)
-                );
-            } catch (\Exception $e) {
-                // Log email error but don't fail the request
-                Log::error('Failed to send leave request status email to employee: ' . $e->getMessage(), [
-                    'employee_email' => $leaveRequest->employee->user->email,
-                    'leave_request_id' => $leaveRequest->id,
+            if ($shouldNotifyEmployee) {
+                Notification::create([
+                    'user_id' => $leaveRequest->employee->user_id,
+                    'sender_id' => Auth::id(),
+                    'title' => $notificationTitle,
+                    'message' => $notificationMessage,
+                    'type' => 'inbox',
+                    'category' => 'leave_request',
+                    'data' => json_encode([
+                        'leave_request_id' => $leaveRequest->id,
+                        'request_type' => $leaveRequest->request_type,
+                        'status' => $leaveRequest->status,
+                        'start_date' => Carbon::parse($leaveRequest->start_date)->format('Y-m-d'),
+                        'end_date' => Carbon::parse($leaveRequest->end_date)->format('Y-m-d'),
+                    ]),
                 ]);
+
+                try {
+                    Mail::to($leaveRequest->employee->user->email)->send(
+                        new LeaveRequestStatusChangedMail($leaveRequest, $leaveRequest->employee->user->name)
+                    );
+                } catch (\Exception $e) {
+                    Log::error('Failed to send leave request status email to employee: ' . $e->getMessage(), [
+                        'employee_email' => $leaveRequest->employee->user->email,
+                        'leave_request_id' => $leaveRequest->id,
+                    ]);
+                }
             }
 
-            // Log activity
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => $actionType,
                 'module' => 'leave_request',
                 'reference_id' => $leaveRequest->id,
-                'description' => ucfirst($actionType) . 'd leave request - ' . $leaveRequest->request_type_name,
+                'description' => ucfirst(str_replace('_', ' ', $actionType)) . ' leave request - ' . $leaveRequest->request_type_name,
             ]);
 
             DB::commit();
 
-            // Reload relationships
-            $leaveRequest->load(['employee.user', 'approvedByManager.user']);
-
             return response()->json([
-                'message' => 'Leave request status updated successfully',
-                'data' => $leaveRequest,
+                'message' => $responseMessage,
+                'data' => $this->serializeLeaveRequest($leaveRequest, $user, $employee),
                 'schedule_updated_days' => $updatedAssignmentsCount,
             ]);
+        } catch (\RuntimeException $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json([
@@ -479,9 +562,7 @@ class LeaveRequestController extends Controller
         $employee = Auth::user()->employee;
         $user = Auth::user();
 
-        // Only employee who created the request can delete it
         if ($employee && $leaveRequest->employee_id !== $employee->id) {
-            // Unless they're a manager
             if (!$this->isManagerRole($user->role)) {
                 return response()->json([
                     'message' => 'Unauthorized to delete this leave request',
@@ -489,7 +570,6 @@ class LeaveRequestController extends Controller
             }
         }
 
-        // Only pending requests can be deleted
         if ($leaveRequest->status !== LeaveRequest::STATUS_PENDING) {
             return response()->json([
                 'message' => 'Only pending leave requests can be deleted',
@@ -498,7 +578,6 @@ class LeaveRequestController extends Controller
 
         DB::beginTransaction();
         try {
-            // Log activity before deletion
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => 'delete',
@@ -535,12 +614,10 @@ class LeaveRequestController extends Controller
 
         $query = LeaveRequest::query();
 
-        // If not manager, only show own statistics
         if (!$isManager && $employee) {
             $query->where('employee_id', $employee->id);
         }
 
-        // Filter by year
         $year = $request->get('year', date('Y'));
         $query->whereYear('start_date', $year);
 
@@ -557,7 +634,6 @@ class LeaveRequestController extends Controller
             ],
         ];
 
-        // Calculate total approved leave days
         $approvedRequests = (clone $query)->approved()->get();
         $statistics['total_approved_days'] = $approvedRequests->sum('total_days');
 
@@ -637,82 +713,403 @@ class LeaveRequestController extends Controller
         };
     }
 
-    /**
-     * Notify managers about new leave request
-     * Prioritize managers responsible for the leave period
-     */
-    private function notifyManagers(LeaveRequest $leaveRequest)
+    private function getManagerEmployeeIds(): array
     {
-        $managers = collect();
-        
-        // Try to find managers responsible for the leave period dates
-        $responsibleManagers = DB::table('manager_duties')
-            ->join('roster_days', 'manager_duties.roster_day_id', '=', 'roster_days.id')
-            ->join('employees', 'manager_duties.employee_id', '=', 'employees.id')
-            ->join('users', 'employees.user_id', '=', 'users.id')
-            ->whereBetween('roster_days.work_date', [
-                $leaveRequest->start_date,
-                $leaveRequest->end_date
-            ])
-            ->whereIn('users.role', [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])
-            ->where('users.id', '!=', $leaveRequest->employee->user_id)
-            ->where('users.is_active', true)
-            ->whereNull('manager_duties.deleted_at')
-            ->whereNull('employees.deleted_at')
-            ->whereNull('users.deleted_at')
-            ->select('users.id', 'users.name', 'users.email')
-            ->distinct()
-            ->get();
+        static $managerEmployeeIds = null;
 
-        if ($responsibleManagers->isNotEmpty()) {
-            // Use specific managers responsible for those dates
-            $managers = $responsibleManagers;
-        } else {
-            // Fallback: notify all active managers
-            $managers = User::whereIn('role', [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])
-                ->where('id', '!=', $leaveRequest->employee->user_id)
-                ->where('is_active', true)
-                ->select('id', 'name', 'email')
-                ->get();
+        if ($managerEmployeeIds !== null) {
+            return $managerEmployeeIds;
         }
 
-        $managers = $managers->unique('id')->values();
+        $managerEmployeeIds = Employee::query()
+            ->whereHas('user', function ($query) {
+                $query->whereIn('role', [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])
+                    ->where('is_active', true);
+            })
+            ->pluck('id')
+            ->toArray();
 
-        $formattedStartDate = \Carbon\Carbon::parse($leaveRequest->start_date)->format('d M Y');
-        $formattedEndDate = \Carbon\Carbon::parse($leaveRequest->end_date)->format('d M Y');
-        $isoStartDate = \Carbon\Carbon::parse($leaveRequest->start_date)->format('Y-m-d');
-        $isoEndDate = \Carbon\Carbon::parse($leaveRequest->end_date)->format('Y-m-d');
+        return $managerEmployeeIds;
+    }
 
-        foreach ($managers as $manager) {
-            // Create notification in database
+    private function resolveApprovalBlueprints(LeaveRequest $leaveRequest): array
+    {
+        $approvalBlueprints = [];
+        $missingDates = [];
+
+        foreach (CarbonPeriod::create($leaveRequest->start_date, $leaveRequest->end_date) as $date) {
+            $workDate = $date->format('Y-m-d');
+            $resolution = $this->resolveManagerAssignmentForDate($leaveRequest, $workDate);
+
+            if (!$resolution['manager_employee']) {
+                $missingDates[] = $resolution['message'];
+                continue;
+            }
+
+            $approvalBlueprints[] = [
+                'work_date' => $workDate,
+                'roster_day_id' => $resolution['roster_day']?->id,
+                'employee_shift_notes' => $resolution['employee_shift_notes'],
+                'manager_employee_id' => $resolution['manager_employee']->id,
+                'manager_employee' => $resolution['manager_employee'],
+            ];
+        }
+
+        return [
+            'approvals' => $approvalBlueprints,
+            'missing_dates' => $missingDates,
+        ];
+    }
+
+    private function resolveManagerAssignmentForDate(LeaveRequest $leaveRequest, string $workDate): array
+    {
+        $publishedRosterDay = RosterDay::query()
+            ->whereDate('work_date', $workDate)
+            ->whereHas('rosterPeriod', function ($query) {
+                $query->where('status', 'published');
+            })
+            ->with('rosterPeriod')
+            ->orderByDesc('id')
+            ->first();
+
+        if (!$publishedRosterDay) {
+            return [
+                'roster_day' => null,
+                'employee_shift_notes' => null,
+                'manager_employee' => null,
+                'message' => 'Tanggal ' . Carbon::parse($workDate)->format('d M Y') . ' belum memiliki roster published.',
+            ];
+        }
+
+        $employeeAssignment = ShiftAssignment::query()
+            ->where('roster_day_id', $publishedRosterDay->id)
+            ->where('employee_id', $leaveRequest->employee_id)
+            ->first();
+
+        $employeeShiftNotes = trim((string) ($employeeAssignment?->notes ?? ''));
+        $managerEmployee = null;
+
+        if ($employeeShiftNotes !== '') {
+            $managerAssignment = ShiftAssignment::query()
+                ->with('employee.user')
+                ->where('roster_day_id', $publishedRosterDay->id)
+                ->whereIn('employee_id', $this->getManagerEmployeeIds())
+                ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower($employeeShiftNotes)])
+                ->get()
+                ->sortBy(function (ShiftAssignment $assignment) {
+                    return $this->isManagerTeknikRole($assignment->employee?->user?->role) ? 0 : 1;
+                })
+                ->first();
+
+            $managerEmployee = $managerAssignment?->employee;
+        }
+
+        if (!$managerEmployee) {
+            $managerDuty = ManagerDuty::query()
+                ->with('employee.user')
+                ->where('roster_day_id', $publishedRosterDay->id)
+                ->whereHas('employee.user', function ($query) {
+                    $query->whereIn('role', [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])
+                        ->where('is_active', true);
+                })
+                ->get()
+                ->sortBy(function (ManagerDuty $duty) {
+                    return $this->isManagerTeknikRole($duty->employee?->user?->role) ? 0 : 1;
+                })
+                ->first();
+
+            $managerEmployee = $managerDuty?->employee;
+        }
+
+        if (!$managerEmployee) {
+            $reason = $employeeShiftNotes !== ''
+                ? 'Tidak ada manager yang bertugas pada shift ' . $employeeShiftNotes
+                : 'Karyawan belum memiliki assignment shift pada roster published';
+
+            return [
+                'roster_day' => $publishedRosterDay,
+                'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
+                'manager_employee' => null,
+                'message' => 'Tanggal ' . Carbon::parse($workDate)->format('d M Y') . ': ' . $reason . '.',
+            ];
+        }
+
+        return [
+            'roster_day' => $publishedRosterDay,
+            'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
+            'manager_employee' => $managerEmployee,
+            'message' => null,
+        ];
+    }
+
+    private function ensurePendingApprovals(LeaveRequest $leaveRequest): Collection
+    {
+        $leaveRequest->loadMissing($this->getLeaveRequestRelations());
+
+        if ($leaveRequest->approvals->isNotEmpty() || $leaveRequest->status !== LeaveRequest::STATUS_PENDING) {
+            return $leaveRequest->approvals->values();
+        }
+
+        $approvalBlueprints = $this->resolveApprovalBlueprints($leaveRequest);
+        if (!empty($approvalBlueprints['missing_dates'])) {
+            throw new \RuntimeException('Manager penanggung jawab belum tersedia: ' . implode(' ', $approvalBlueprints['missing_dates']));
+        }
+
+        foreach ($approvalBlueprints['approvals'] as $approvalData) {
+            LeaveRequestApproval::create([
+                'leave_request_id' => $leaveRequest->id,
+                'roster_day_id' => $approvalData['roster_day_id'],
+                'work_date' => $approvalData['work_date'],
+                'employee_shift_notes' => $approvalData['employee_shift_notes'],
+                'manager_employee_id' => $approvalData['manager_employee_id'],
+                'status' => LeaveRequestApproval::STATUS_PENDING,
+            ]);
+        }
+
+        $leaveRequest->refresh()->load($this->getLeaveRequestRelations());
+
+        return $leaveRequest->approvals->values();
+    }
+
+    private function markApprovals(Collection $approvals, string $status, ?string $notes): void
+    {
+        $now = now();
+
+        foreach ($approvals as $approval) {
+            $approval->update([
+                'status' => $status,
+                'approval_notes' => $notes,
+                'approved_at' => $now,
+            ]);
+        }
+    }
+
+    private function serializeLeaveRequest(LeaveRequest $leaveRequest, ?User $currentUser = null, ?Employee $currentEmployee = null): array
+    {
+        $payload = $leaveRequest->toArray();
+        unset($payload['approvals']);
+
+        $approvalDates = $this->buildApprovalDatesPayload($leaveRequest, $currentEmployee);
+        $approvalSummary = [
+            'total_dates' => $approvalDates->count(),
+            'approved_dates' => $approvalDates->where('status', LeaveRequestApproval::STATUS_APPROVED)->count(),
+            'pending_dates' => $approvalDates->where('status', LeaveRequestApproval::STATUS_PENDING)->count(),
+            'rejected_dates' => $approvalDates->where('status', LeaveRequestApproval::STATUS_REJECTED)->count(),
+        ];
+        $approvalSummary['is_fully_approved'] = $approvalSummary['total_dates'] > 0
+            && $approvalSummary['approved_dates'] === $approvalSummary['total_dates'];
+
+        $currentUserPendingDates = $approvalDates
+            ->filter(fn(array $approval) => $approval['current_user_can_approve'] === true)
+            ->pluck('work_date')
+            ->values()
+            ->all();
+
+        $payload['approval_dates'] = $approvalDates->values()->all();
+        $payload['approval_summary'] = $approvalSummary;
+        $payload['current_user_can_approve'] = !empty($currentUserPendingDates);
+        $payload['current_user_pending_approval_dates'] = $currentUserPendingDates;
+        $payload['current_user_already_approved'] = $approvalDates->contains(function (array $approval) {
+            return $approval['current_user_already_approved'] === true;
+        });
+        $payload['assigned_managers'] = $approvalDates
+            ->pluck('manager')
+            ->filter()
+            ->unique('id')
+            ->values()
+            ->all();
+
+        return $payload;
+    }
+
+    private function buildApprovalDatesPayload(LeaveRequest $leaveRequest, ?Employee $currentEmployee): Collection
+    {
+        $leaveRequest->loadMissing($this->getLeaveRequestRelations());
+
+        if ($leaveRequest->approvals->isNotEmpty()) {
+            return $leaveRequest->approvals->map(function (LeaveRequestApproval $approval) use ($currentEmployee) {
+                $isCurrentUserManager = $currentEmployee && (int) $approval->manager_employee_id === (int) $currentEmployee->id;
+                $managerUser = $approval->managerEmployee?->user;
+
+                return [
+                    'id' => $approval->id,
+                    'work_date' => $approval->work_date ? Carbon::parse($approval->work_date)->format('Y-m-d') : null,
+                    'roster_day_id' => $approval->roster_day_id,
+                    'employee_shift_notes' => $approval->employee_shift_notes,
+                    'status' => $approval->status,
+                    'status_name' => $this->getApprovalStatusName($approval->status),
+                    'approval_notes' => $approval->approval_notes,
+                    'approved_at' => $approval->approved_at?->toIso8601String(),
+                    'manager_employee_id' => $approval->manager_employee_id,
+                    'manager' => $managerUser ? [
+                        'id' => $managerUser->id,
+                        'employee_id' => $approval->manager_employee_id,
+                        'name' => $managerUser->name,
+                        'email' => $managerUser->email,
+                        'role' => $managerUser->role,
+                    ] : null,
+                    'current_user_is_assigned_manager' => $isCurrentUserManager,
+                    'current_user_can_approve' => $isCurrentUserManager && $approval->status === LeaveRequestApproval::STATUS_PENDING,
+                    'current_user_already_approved' => $isCurrentUserManager && $approval->status === LeaveRequestApproval::STATUS_APPROVED,
+                    'needs_assignment' => false,
+                ];
+            });
+        }
+
+        if ($leaveRequest->status === LeaveRequest::STATUS_PENDING) {
+            $approvalBlueprints = $this->resolveApprovalBlueprints($leaveRequest);
+
+            $pendingApprovals = collect($approvalBlueprints['approvals'])->map(function (array $approval) use ($currentEmployee) {
+                $managerUser = $approval['manager_employee']?->user;
+                $isCurrentUserManager = $currentEmployee && (int) $approval['manager_employee_id'] === (int) $currentEmployee->id;
+
+                return [
+                    'id' => null,
+                    'work_date' => $approval['work_date'],
+                    'roster_day_id' => $approval['roster_day_id'],
+                    'employee_shift_notes' => $approval['employee_shift_notes'],
+                    'status' => LeaveRequestApproval::STATUS_PENDING,
+                    'status_name' => $this->getApprovalStatusName(LeaveRequestApproval::STATUS_PENDING),
+                    'approval_notes' => null,
+                    'approved_at' => null,
+                    'manager_employee_id' => $approval['manager_employee_id'],
+                    'manager' => $managerUser ? [
+                        'id' => $managerUser->id,
+                        'employee_id' => $approval['manager_employee_id'],
+                        'name' => $managerUser->name,
+                        'email' => $managerUser->email,
+                        'role' => $managerUser->role,
+                    ] : null,
+                    'current_user_is_assigned_manager' => $isCurrentUserManager,
+                    'current_user_can_approve' => $isCurrentUserManager,
+                    'current_user_already_approved' => false,
+                    'needs_assignment' => false,
+                ];
+            });
+
+            $missingApprovals = collect($approvalBlueprints['missing_dates'])->map(function (string $message) {
+                preg_match('/Tanggal\s(\d{2}\s\w{3}\s\d{4})/', $message, $matches);
+
+                return [
+                    'id' => null,
+                    'work_date' => null,
+                    'roster_day_id' => null,
+                    'employee_shift_notes' => null,
+                    'status' => LeaveRequestApproval::STATUS_PENDING,
+                    'status_name' => 'Manager Belum Tersedia',
+                    'approval_notes' => $message,
+                    'approved_at' => null,
+                    'manager_employee_id' => null,
+                    'manager' => null,
+                    'current_user_is_assigned_manager' => false,
+                    'current_user_can_approve' => false,
+                    'current_user_already_approved' => false,
+                    'needs_assignment' => true,
+                    'label' => $matches[1] ?? $message,
+                ];
+            });
+
+            return $pendingApprovals->concat($missingApprovals)->values();
+        }
+
+        $approvedByUser = $leaveRequest->approvedByManager?->user;
+
+        return collect(CarbonPeriod::create($leaveRequest->start_date, $leaveRequest->end_date))
+            ->map(function (Carbon $date) use ($leaveRequest, $approvedByUser, $currentEmployee) {
+                $isCurrentUserManager = $currentEmployee && (int) $leaveRequest->approved_by_manager_id === (int) $currentEmployee->id;
+
+                return [
+                    'id' => null,
+                    'work_date' => $date->format('Y-m-d'),
+                    'roster_day_id' => null,
+                    'employee_shift_notes' => null,
+                    'status' => $leaveRequest->status,
+                    'status_name' => $this->getApprovalStatusName($leaveRequest->status),
+                    'approval_notes' => $leaveRequest->approval_notes,
+                    'approved_at' => $leaveRequest->approved_at?->toIso8601String(),
+                    'manager_employee_id' => $leaveRequest->approved_by_manager_id,
+                    'manager' => $approvedByUser ? [
+                        'id' => $approvedByUser->id,
+                        'employee_id' => $leaveRequest->approved_by_manager_id,
+                        'name' => $approvedByUser->name,
+                        'email' => $approvedByUser->email,
+                        'role' => $approvedByUser->role,
+                    ] : null,
+                    'current_user_is_assigned_manager' => $isCurrentUserManager,
+                    'current_user_can_approve' => false,
+                    'current_user_already_approved' => $isCurrentUserManager && $leaveRequest->status === LeaveRequest::STATUS_APPROVED,
+                    'needs_assignment' => false,
+                ];
+            })
+            ->values();
+    }
+
+    private function getApprovalStatusName(string $status): string
+    {
+        return match ($status) {
+            LeaveRequestApproval::STATUS_APPROVED, LeaveRequest::STATUS_APPROVED => 'Disetujui',
+            LeaveRequestApproval::STATUS_REJECTED, LeaveRequest::STATUS_REJECTED => 'Ditolak',
+            default => 'Menunggu Persetujuan',
+        };
+    }
+
+    /**
+     * Notify managers about new leave request.
+     */
+    private function notifyManagers(LeaveRequest $leaveRequest): void
+    {
+        $leaveRequest->loadMissing($this->getLeaveRequestRelations());
+
+        $formattedStartDate = Carbon::parse($leaveRequest->start_date)->format('d M Y');
+        $formattedEndDate = Carbon::parse($leaveRequest->end_date)->format('d M Y');
+        $isoStartDate = Carbon::parse($leaveRequest->start_date)->format('Y-m-d');
+        $isoEndDate = Carbon::parse($leaveRequest->end_date)->format('Y-m-d');
+
+        $managerGroups = $leaveRequest->approvals
+            ->filter(fn(LeaveRequestApproval $approval) => $approval->managerEmployee?->user)
+            ->groupBy('manager_employee_id');
+
+        foreach ($managerGroups as $approvals) {
+            /** @var LeaveRequestApproval $firstApproval */
+            $firstApproval = $approvals->first();
+            $managerUser = $firstApproval->managerEmployee?->user;
+
+            if (!$managerUser) {
+                continue;
+            }
+
+            $datesLabel = $approvals
+                ->map(fn(LeaveRequestApproval $approval) => Carbon::parse($approval->work_date)->format('d M Y'))
+                ->unique()
+                ->implode(', ');
+
             Notification::create([
-                'user_id'  => $manager->id,
+                'user_id' => $managerUser->id,
                 'sender_id' => $leaveRequest->employee->user_id,
-                'title'    => 'Permohonan Cuti Baru #'.$leaveRequest->id,
-                'message'  => $leaveRequest->employee->user->name . ' mengajukan permohonan ' . 
-                             $leaveRequest->request_type_name . ' (' . 
-                             $formattedStartDate . ' - ' . 
-                             $formattedEndDate . ')',
-                'type'     => 'inbox',
+                'title' => 'Permohonan Cuti Baru #' . $leaveRequest->id,
+                'message' => $leaveRequest->employee->user->name . ' mengajukan permohonan ' .
+                    $leaveRequest->request_type_name . ' (' .
+                    $formattedStartDate . ' - ' .
+                    $formattedEndDate . '). Tanggal yang membutuhkan approval Anda: ' . $datesLabel,
+                'type' => 'inbox',
                 'category' => 'leave_request',
-                'data'     => json_encode([
+                'data' => json_encode([
                     'leave_request_id' => $leaveRequest->id,
                     'employee_name' => $leaveRequest->employee->user->name,
                     'request_type' => $leaveRequest->request_type,
                     'start_date' => $isoStartDate,
                     'end_date' => $isoEndDate,
+                    'approval_dates' => $approvals->map(fn(LeaveRequestApproval $approval) => $approval->work_date ? Carbon::parse($approval->work_date)->format('Y-m-d') : null)->filter()->values()->all(),
                 ]),
             ]);
 
-            // Send email notification
             try {
-                Mail::to($manager->email)->send(
-                    new LeaveRequestSubmittedMail($leaveRequest, $manager->name)
+                Mail::to($managerUser->email)->send(
+                    new LeaveRequestSubmittedMail($leaveRequest, $managerUser->name)
                 );
             } catch (\Exception $e) {
-                // Log email error but don't fail the request
                 Log::error('Failed to send leave request email to manager: ' . $e->getMessage(), [
-                    'manager_email' => $manager->email,
+                    'manager_email' => $managerUser->email,
                     'leave_request_id' => $leaveRequest->id,
                 ]);
             }

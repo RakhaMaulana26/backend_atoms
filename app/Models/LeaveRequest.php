@@ -77,6 +77,11 @@ class LeaveRequest extends Model
         return $this->belongsTo(Employee::class, 'approved_by_manager_id');
     }
 
+    public function approvals()
+    {
+        return $this->hasMany(LeaveRequestApproval::class)->orderBy('work_date');
+    }
+
     /**
      * Scopes
      */
