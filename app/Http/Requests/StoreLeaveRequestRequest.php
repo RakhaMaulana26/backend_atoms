@@ -46,6 +46,17 @@ class StoreLeaveRequestRequest extends FormRequest
                     ]);
                 }),
             ],
+            'annual_leave_subtype' => [
+                'nullable',
+                Rule::in([
+                    'cuti_kepentingan',
+                    'cuti_bersalin',
+                    'cuti_tahunan',
+                ]),
+                Rule::requiredIf(function () {
+                    return $this->request_type === LeaveRequest::TYPE_ANNUAL_LEAVE;
+                }),
+            ],
             'institution' => [
                 'nullable',
                 'string',
@@ -103,6 +114,8 @@ class StoreLeaveRequestRequest extends FormRequest
             'end_date.after_or_equal' => 'Tanggal selesai harus setelah atau sama dengan tanggal mulai',
             'reason.required_if' => 'Alasan wajib diisi untuk cuti tahunan dan cuti dokter',
             'reason.max' => 'Alasan maksimal 1000 karakter',
+            'annual_leave_subtype.required_if' => 'Jenis cuti kepentingan wajib dipilih',
+            'annual_leave_subtype.in' => 'Jenis cuti kepentingan tidak valid',
             'institution.required_if' => 'Institusi/lokasi penugasan wajib diisi',
             'institution.max' => 'Institusi/lokasi penugasan maksimal 255 karakter',
             'education_type.required_if' => 'Jenis pendidikan wajib diisi untuk tugas pendidikan',
@@ -125,6 +138,7 @@ class StoreLeaveRequestRequest extends FormRequest
     {
         return [
             'request_type' => 'tipe permohonan',
+            'annual_leave_subtype' => 'jenis cuti kepentingan',
             'start_date' => 'tanggal mulai',
             'end_date' => 'tanggal selesai',
             'reason' => 'alasan',

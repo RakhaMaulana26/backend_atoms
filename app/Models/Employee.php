@@ -35,12 +35,14 @@ class Employee extends Model
         'employee_type',
         'group_number',
         'is_active',
+        'is_fixed_manager',
     ];
 
     protected function casts(): array
     {
         return [
             'is_active' => 'boolean',
+            'is_fixed_manager' => 'boolean',
         ];
     }
 

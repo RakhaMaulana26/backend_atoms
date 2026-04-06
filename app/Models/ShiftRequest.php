@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\ShiftResolverService;
 use App\Traits\HasAuditFields;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -127,37 +128,13 @@ class ShiftRequest extends Model
     }
 
     /**
-     * Resolve manager employee IDs from user roles (no hardcoded IDs).
-     */
-    private function getManagerEmployeeIds(): array
-    {
-        return Employee::query()
-            ->whereHas('user', function ($q) {
-                $q->whereIn('role', [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER]);
-            })
-            ->pluck('id')
-            ->toArray();
-    }
-
-    /**
      * Check if both managers are the same person
-     * Manager is determined by employee who has the SAME shift (notes) on that roster_day
+     * Manager is determined from manager_duties on the involved shift/date
      */
     public function hasSameManager(): bool
     {
-        $managerEmployeeIds = $this->getManagerEmployeeIds();
-
-        // Find manager working requester's EXACT shift
-        $fromManager = ShiftAssignment::where('roster_day_id', $this->from_roster_day_id)
-            ->whereIn('employee_id', $managerEmployeeIds)
-            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($this->requester_notes ?? ''))])
-            ->first();
-
-        // Find manager working target's EXACT shift
-        $toManager = ShiftAssignment::where('roster_day_id', $this->to_roster_day_id)
-            ->whereIn('employee_id', $managerEmployeeIds)
-            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($this->target_notes ?? ''))])
-            ->first();
+        $fromManager = $this->getFromManager();
+        $toManager = $this->getToManager();
 
         if (!$fromManager || !$toManager) {
             return false;
@@ -169,13 +146,15 @@ class ShiftRequest extends Model
     /**
      * Get the manager employee working the requester's EXACT shift
      */
-    public function getFromManager(): ?ShiftAssignment
+    public function getFromManager(): ?ManagerDuty
     {
-        $managerEmployeeIds = $this->getManagerEmployeeIds();
+        $requesterShiftId = $this->getRequesterShiftId();
+        if (!$requesterShiftId) {
+            return null;
+        }
 
-        return ShiftAssignment::where('roster_day_id', $this->from_roster_day_id)
-            ->whereIn('employee_id', $managerEmployeeIds)
-            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($this->requester_notes ?? ''))])
+        return ManagerDuty::where('roster_day_id', $this->from_roster_day_id)
+            ->where('shift_id', $requesterShiftId)
             ->with('employee.user')
             ->first();
     }
@@ -183,13 +162,15 @@ class ShiftRequest extends Model
     /**
      * Get the manager employee working the target's EXACT shift
      */
-    public function getToManager(): ?ShiftAssignment
+    public function getToManager(): ?ManagerDuty
     {
-        $managerEmployeeIds = $this->getManagerEmployeeIds();
+        $targetShiftId = $this->getTargetShiftId();
+        if (!$targetShiftId) {
+            return null;
+        }
 
-        return ShiftAssignment::where('roster_day_id', $this->to_roster_day_id)
-            ->whereIn('employee_id', $managerEmployeeIds)
-            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($this->target_notes ?? ''))])
+        return ManagerDuty::where('roster_day_id', $this->to_roster_day_id)
+            ->where('shift_id', $targetShiftId)
             ->with('employee.user')
             ->first();
     }
@@ -298,36 +279,11 @@ class ShiftRequest extends Model
 
     /**
      * Resolve shift_id from notes by looking up Shift table
+     * Uses centralized ShiftResolverService for consistency
      */
     private function resolveShiftIdFromNotes(?string $notes): ?int
     {
-        if (!$notes) return null;
-
-        $notesUpper = strtoupper(trim($notes));
-        
-        // Map notes to shift name
-        $shiftNameMap = [
-            'P' => 'pagi',
-            'S' => 'siang',
-            'M' => 'malam',
-        ];
-
-        if (!isset($shiftNameMap[$notesUpper])) {
-            return null; // Non-working notes like L, CT, etc.
-        }
-
-        $shiftName = $shiftNameMap[$notesUpper];
-        $shift = \App\Models\Shift::where('name', 'LIKE', $shiftName . '%')
-            ->orWhere('name', 'LIKE', ucfirst($shiftName) . '%')
-            ->first();
-
-        \Log::info('resolveShiftIdFromNotes', [
-            'notes' => $notes,
-            'shiftName' => $shiftName,
-            'resolved_shift_id' => $shift?->id,
-        ]);
-
-        return $shift?->id;
+        return ShiftResolverService::resolveShiftId($notes);
     }
 
     // =============================

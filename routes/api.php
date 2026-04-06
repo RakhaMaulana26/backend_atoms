@@ -83,6 +83,14 @@ Route::middleware('auth:sanctum')->group(function () {
         
         // Batch update multiple employees and dates at once
         Route::post('/{roster_id}/assignments/batch-update', [RosterController::class, 'batchUpdateAssignments']);
+        
+        // Manager assignment endpoints (add/remove managers for roster period)
+        Route::post('/{id}/managers/add', [RosterController::class, 'addManager']);
+        Route::delete('/{id}/managers/{employeeId}', [RosterController::class, 'removeManager']);
+
+        // Group formation endpoints for CNS/Support
+        Route::post('/{id}/groups/assign', [RosterController::class, 'assignEmployeeToGroup']);
+        Route::delete('/{id}/groups/{employeeId}', [RosterController::class, 'removeEmployeeFromGroup']);
     });
 
     // =======================================
@@ -95,12 +103,13 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/available-partners', [ShiftRequestController::class, 'getAvailablePartners']);
         Route::get('/pending-count', [ShiftRequestController::class, 'getPendingCount']);
         Route::get('/manager-for-shift', [ShiftRequestController::class, 'getManagerForShift']);
+        Route::get('/check-manager-status', [ShiftRequestController::class, 'checkManagerStatus']);
         Route::get('/{id}', [ShiftRequestController::class, 'show']);
         
         // Create & Actions
         Route::post('/', [ShiftRequestController::class, 'store']);
         Route::post('/{id}/approve-target', [ShiftRequestController::class, 'approveByTarget']);
-        Route::post('/{id}/approve-manager', [ShiftRequestController::class, 'approveByManager'])->middleware('role:' . User::ROLE_MANAGER_TEKNIK . ',' . User::ROLE_GENERAL_MANAGER);
+        Route::post('/{id}/approve-manager', [ShiftRequestController::class, 'approveByManager']);
         Route::post('/{id}/reject', [ShiftRequestController::class, 'reject']);
         Route::post('/{id}/cancel', [ShiftRequestController::class, 'cancel']);
     });

@@ -56,6 +56,25 @@ class LeaveRequestController extends Controller
         return $this->normalizeRole($role) === $this->normalizeRole(User::ROLE_MANAGER_TEKNIK);
     }
 
+    private function getGeneralManagerEmployeeIds(): array
+    {
+        static $generalManagerEmployeeIds = null;
+
+        if ($generalManagerEmployeeIds !== null) {
+            return $generalManagerEmployeeIds;
+        }
+
+        $generalManagerEmployeeIds = Employee::query()
+            ->whereHas('user', function ($query) {
+                $query->where('role', User::ROLE_GENERAL_MANAGER)
+                    ->where('is_active', true);
+            })
+            ->pluck('id')
+            ->toArray();
+
+        return $generalManagerEmployeeIds;
+    }
+
     private function getLeaveRequestRelations(): array
     {
         return [
@@ -260,6 +279,16 @@ class LeaveRequestController extends Controller
 
         DB::beginTransaction();
         try {
+            Log::info('[leave_request][create] Incoming leave request', [
+                'requester_employee_id' => $employee->id,
+                'requester_user_id' => Auth::id(),
+                'requester_name' => Auth::user()?->name,
+                'requester_email' => Auth::user()?->email,
+                'request_type' => $request->request_type,
+                'start_date' => $request->start_date,
+                'end_date' => $request->end_date,
+            ]);
+
             $requiresDocument = $request->request_type !== LeaveRequest::TYPE_ANNUAL_LEAVE;
 
             if ($requiresDocument && !$request->hasFile('document')) {
@@ -304,6 +333,18 @@ class LeaveRequestController extends Controller
                 'status' => LeaveRequest::STATUS_PENDING,
             ];
 
+            if ($request->request_type === LeaveRequest::TYPE_ANNUAL_LEAVE) {
+                $subtype = (string) $request->input('annual_leave_subtype', 'cuti_kepentingan');
+                $subtypeLabel = match ($subtype) {
+                    'cuti_bersalin' => 'Cuti Bersalin',
+                    'cuti_tahunan' => 'Cuti Tahunan',
+                    default => 'Cuti Kepentingan',
+                };
+
+                $existingReason = trim((string) ($request->reason ?? ''));
+                $data['reason'] = '[' . $subtypeLabel . '] ' . $existingReason;
+            }
+
             $leaveRequest = LeaveRequest::create($data);
 
             if ($leaveRequest->hasOverlap($leaveRequest->id)) {
@@ -335,6 +376,18 @@ class LeaveRequestController extends Controller
                 ]);
             }
 
+            Log::info('[leave_request][create] Approval blueprint resolved', [
+                'leave_request_id' => $leaveRequest->id,
+                'approvals_count' => count($approvalBlueprints['approvals']),
+                'approval_targets' => collect($approvalBlueprints['approvals'])->map(function ($approval) {
+                    return [
+                        'work_date' => $approval['work_date'] ?? null,
+                        'roster_day_id' => $approval['roster_day_id'] ?? null,
+                        'manager_employee_id' => $approval['manager_employee_id'] ?? null,
+                    ];
+                })->values()->all(),
+            ]);
+
             $leaveRequest->load($this->getLeaveRequestRelations());
 
             $this->notifyManagers($leaveRequest);
@@ -358,6 +411,15 @@ class LeaveRequestController extends Controller
                 ]),
             ]);
 
+            Log::info('[leave_request][notify] Requester notification created', [
+                'leave_request_id' => $leaveRequest->id,
+                'recipient_user_id' => $leaveRequest->employee->user_id,
+                'recipient_employee_id' => $leaveRequest->employee_id,
+                'recipient_name' => $leaveRequest->employee?->user?->name,
+                'recipient_email' => $leaveRequest->employee?->user?->email,
+                'channel' => 'in-app',
+            ]);
+
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => 'create',
@@ -367,6 +429,11 @@ class LeaveRequestController extends Controller
             ]);
 
             DB::commit();
+
+            Log::info('[leave_request][create] Leave request committed', [
+                'leave_request_id' => $leaveRequest->id,
+                'requester_user_id' => Auth::id(),
+            ]);
 
             return response()->json([
                 'message' => 'Leave request created successfully',
@@ -734,6 +801,8 @@ class LeaveRequestController extends Controller
 
     private function resolveApprovalBlueprints(LeaveRequest $leaveRequest): array
     {
+        $leaveRequest->loadMissing('employee.user');
+
         $approvalBlueprints = [];
         $missingDates = [];
 
@@ -788,6 +857,37 @@ class LeaveRequestController extends Controller
 
         $employeeShiftNotes = trim((string) ($employeeAssignment?->notes ?? ''));
         $managerEmployee = null;
+
+        // If the requester is a manager, approval must go to General Manager.
+        if ($this->isManagerRole($leaveRequest->employee?->user?->role)) {
+            $generalManagerEmployeeIds = $this->getGeneralManagerEmployeeIds();
+
+            if (!empty($generalManagerEmployeeIds)) {
+                $generalManagerEmployee = Employee::query()
+                    ->with('user')
+                    ->whereIn('id', $generalManagerEmployeeIds)
+                    ->whereHas('user', function ($query) {
+                        $query->where('is_active', true);
+                    })
+                    ->first();
+
+                if ($generalManagerEmployee) {
+                    return [
+                        'roster_day' => $publishedRosterDay,
+                        'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
+                        'manager_employee' => $generalManagerEmployee,
+                        'message' => null,
+                    ];
+                }
+            }
+
+            return [
+                'roster_day' => $publishedRosterDay,
+                'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
+                'manager_employee' => null,
+                'message' => 'General Manager tidak ditemukan untuk approval cuti manager.',
+            ];
+        }
 
         if ($employeeShiftNotes !== '') {
             $managerAssignment = ShiftAssignment::query()
@@ -1060,6 +1160,13 @@ class LeaveRequestController extends Controller
     {
         $leaveRequest->loadMissing($this->getLeaveRequestRelations());
 
+        Log::info('[leave_request][notify_manager] Called', [
+            'leave_request_id' => $leaveRequest->id,
+            'requester_employee_id' => $leaveRequest->employee_id,
+            'requester_name' => $leaveRequest->employee?->user?->name,
+            'requester_email' => $leaveRequest->employee?->user?->email,
+        ]);
+
         $formattedStartDate = Carbon::parse($leaveRequest->start_date)->format('d M Y');
         $formattedEndDate = Carbon::parse($leaveRequest->end_date)->format('d M Y');
         $isoStartDate = Carbon::parse($leaveRequest->start_date)->format('Y-m-d');
@@ -1103,10 +1210,28 @@ class LeaveRequestController extends Controller
                 ]),
             ]);
 
+            Log::info('[leave_request][notify_manager] Manager notification created', [
+                'leave_request_id' => $leaveRequest->id,
+                'manager_user_id' => $managerUser->id,
+                'manager_employee_id' => $firstApproval->manager_employee_id,
+                'manager_name' => $managerUser->name,
+                'manager_email' => $managerUser->email,
+                'manager_role' => $managerUser->role,
+                'approval_dates' => $approvals->map(fn(LeaveRequestApproval $approval) => $approval->work_date ? Carbon::parse($approval->work_date)->format('Y-m-d') : null)->filter()->values()->all(),
+                'channel' => 'in-app',
+            ]);
+
             try {
                 Mail::to($managerUser->email)->send(
                     new LeaveRequestSubmittedMail($leaveRequest, $managerUser->name)
                 );
+
+                Log::info('[leave_request][notify_manager] Email sent', [
+                    'leave_request_id' => $leaveRequest->id,
+                    'manager_user_id' => $managerUser->id,
+                    'manager_email' => $managerUser->email,
+                    'mail_class' => LeaveRequestSubmittedMail::class,
+                ]);
             } catch (\Exception $e) {
                 Log::error('Failed to send leave request email to manager: ' . $e->getMessage(), [
                     'manager_email' => $managerUser->email,
@@ -1114,5 +1239,10 @@ class LeaveRequestController extends Controller
                 ]);
             }
         }
+
+        Log::info('[leave_request][notify_manager] Completed', [
+            'leave_request_id' => $leaveRequest->id,
+            'managers_notified_count' => $managerGroups->count(),
+        ]);
     }
 }

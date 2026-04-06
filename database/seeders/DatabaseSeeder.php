@@ -59,22 +59,22 @@ class DatabaseSeeder extends Seeder
         ];
 
         // ================================
-        // TEKNIK MT & PT MT (5 employees)
+        // MANAGER TEKNIK (3 employees - Grade 15)
+        // Fixed: Andi MT 2, Efried MT 3, Netty MT 5 - tidak bisa diubah
         // ================================
-        $teknikMT = [
-            ['name' => 'Aditya Huzairi P', 'kelas' => 13, 'jabatan' => 'SVP CNS', 'group' => 1],
+        $managerTeknik = [
             ['name' => 'Andi Wibowo', 'kelas' => 15, 'jabatan' => 'MT 2', 'group' => 1],
             ['name' => 'Efried N.P.', 'kelas' => 15, 'jabatan' => 'MT 3', 'group' => 1],
-            ['name' => 'Fajar Kusuma W', 'kelas' => 13, 'jabatan' => 'SPV TFP', 'group' => 1],
             ['name' => 'Netty Septa C.', 'kelas' => 15, 'jabatan' => 'MT 5', 'group' => 1],
         ];
 
         // ================================
-        // CNSD - TELEKOMUNIKASI (30 employees)
+        // CNSD - TELEKOMUNIKASI (31 employees - termasuk Aditya, Moch. Ichsan, Priyoko sebagai SPV)
         // ================================
         $cnsd = [
-            // Grup 1
-            ['name' => 'Moch. Ichsan', 'kelas' => 14, 'jabatan' => 'FIRST SPV CNS', 'group' => 1],
+            // Grup 1 - dengan Aditya sbg SVP CNS (grade 13)
+            ['name' => 'Aditya Huzairi P', 'kelas' => 13, 'jabatan' => 'SVP CNS', 'group' => 1],
+            ['name' => 'Moch. Ichsan', 'kelas' => 14, 'jabatan' => 'SPV CNS', 'group' => 1],
             ['name' => 'Argo Pragolo', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 1],
             ['name' => 'Khoirul M.A', 'kelas' => 12, 'jabatan' => 'CNS', 'group' => 1],
             ['name' => 'Saiful Bahris', 'kelas' => 9, 'jabatan' => 'CNS', 'group' => 1],
@@ -110,10 +110,11 @@ class DatabaseSeeder extends Seeder
         ];
 
         // ================================
-        // TFP - FASILITAS PENUNJANG (16 employees)
+        // TFP - FASILITAS PENUNJANG (17 employees - termasuk Fajar sbg SPV TFP)
         // ================================
         $tfp = [
             // Grup 1
+            ['name' => 'Fajar Kusuma W', 'kelas' => 13, 'jabatan' => 'SPV TFP', 'group' => 1],
             ['name' => 'Iqbal Mustika', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 1],
             ['name' => 'Agustina Anggreini', 'kelas' => 11, 'jabatan' => 'TFP', 'group' => 1],
             ['name' => 'Fajar Nugroho', 'kelas' => 10, 'jabatan' => 'TFP', 'group' => 1],
@@ -139,36 +140,45 @@ class DatabaseSeeder extends Seeder
         // Create all employees
         // General Manager
         foreach ($generalManagers as $emp) {
-            $this->createEmployee($emp, 'general_manager');
+            $this->createEmployee($emp, 'general_manager', false);
         }
 
-        // Teknik MT - all are Manager Teknik
-        foreach ($teknikMT as $emp) {
-            $this->createEmployee($emp, 'manager_teknik');
+        // Manager Teknik - fixed positions, cannot be changed
+        foreach ($managerTeknik as $emp) {
+            $isFixed = in_array($emp['name'], ['Andi Wibowo', 'Efried N.P.', 'Netty Septa C.']);
+            $this->createEmployee($emp, 'manager_teknik', $isFixed);
         }
 
         // CNSD - all are CNS
         foreach ($cnsd as $emp) {
-            $this->createEmployee($emp, 'cns');
+            $this->createEmployee($emp, 'cns', false);
         }
 
         // TFP - all are Support
         foreach ($tfp as $emp) {
-            $this->createEmployee($emp, 'support');
+            $this->createEmployee($emp, 'support', false);
         }
 
         $this->command->info('✅ Admin user created: admin@airnav.com / password');
         $this->command->info('✅ Airnav employees created:');
-        $this->command->info('   - General Manager: 1 employee (General Manager) → user1@airnav.com');
-        $this->command->info('   - Teknik MT & PT MT: 5 employees (Manager Teknik) → user2–user6@airnav.com');
-        $this->command->info('   - CNSD Telekomunikasi: 29 employees (CNS)');
-        $this->command->info('   - TFP Fasilitas Penunjang: 16 employees (Support)');
+        $this->command->info('   - General Manager: 1 employee');
+        $this->command->info('   - Manager Teknik: 3 employees (FIXED - cannot remove):');
+        $this->command->info('     • Andi Wibowo → MT 2, grade 15 ✅ FIXED');
+        $this->command->info('     • Efried N.P. → MT 3, grade 15 ✅ FIXED');
+        $this->command->info('     • Netty Septa C. → MT 5, grade 15 ✅ FIXED');
+        $this->command->info('   - CNSD Telekomunikasi: 31 employees (CNS)');
+        $this->command->info('     • Aditya Huzairi P → CNS, grade 13 (SVP CNS)');
+        $this->command->info('     • Moch. Ichsan, Nur Hukim → SPV CNS');
+        $this->command->info('   - TFP Fasilitas Penunjang: 17 employees (Support)');
+        $this->command->info('     • Fajar Kusuma W → Support, grade 13 (SPV TFP)');
+        $this->command->info('     • Priyoko → SPV TFP');
         $this->command->info('   Total: 52 employees + 1 admin = 53 users');
         $this->command->info('✅ All users password: password');
         $this->command->info('✅ Email format: user1@airnav.com, user2@airnav.com, ...');
+        $this->command->info('✅ Groups hanya digunakan dalam konteks rostering');
     }
 
-    private function createEmployee(array $data, string $type): void
+    private function createEmployee(array $data, string $type, bool $isFixedManager = false): void
     {
         // Generate simple email: user1@airnav.com, user2@airnav.com, etc.
         $email = 'user' . $this->counter . '@airnav.com';
@@ -210,6 +220,7 @@ class DatabaseSeeder extends Seeder
             'employee_type' => $employeeType,
             'is_active' => true,
             'group_number' => $data['group'] ?? null,
+            'is_fixed_manager' => $isFixedManager,
         ]);
     }
 }

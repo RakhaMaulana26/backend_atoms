@@ -59,6 +59,18 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
+        // 3a. Validate grade compatibility
+        $requesterGrade = Auth::user()->grade !== null ? (int) Auth::user()->grade : null;
+        $targetGrade = $targetEmployee->user?->grade !== null ? (int) $targetEmployee->user->grade : null;
+
+        if (!$this->isSwapGradeCompatible($requesterGrade, $targetGrade)) {
+            $validator->errors()->add(
+                'target_employee_id',
+                'Tukar shift hanya dapat dilakukan dengan kelas jabatan yang sama, atau pasangan/grup kelas berikut: 14-13, 12-11, dan grup 8-9-10. Kelas 15 hanya dapat swap dengan kelas yang sama.'
+            );
+            return;
+        }
+
         // 3. Must have same employee_type (role)
         if ($requesterEmployee->employee_type !== $targetEmployee->employee_type) {
             $validator->errors()->add('target_employee_id', 'Tukar shift hanya dapat dilakukan dengan karyawan dengan role yang sama.');
@@ -238,5 +250,31 @@ class StoreShiftRequestRequest extends FormRequest
             'target_notes.max' => 'Shift target tidak boleh lebih dari 50 karakter.',
             'reason.max' => 'Alasan tidak boleh lebih dari 1000 karakter.',
         ];
+    }
+
+    /**
+     * Determine whether requester and target grade are compatible for swap.
+     */
+    private function isSwapGradeCompatible(?int $requesterGrade, ?int $targetGrade): bool
+    {
+        if ($requesterGrade === null || $targetGrade === null) {
+            return false;
+        }
+
+        if ($requesterGrade === $targetGrade) {
+            return true;
+        }
+
+        $crossGradePairs = [
+            14 => [13],
+            13 => [14],
+            12 => [11],
+            11 => [12],
+            8 => [9, 10],
+            9 => [8, 10],
+            10 => [8, 9],
+        ];
+
+        return in_array($targetGrade, $crossGradePairs[$requesterGrade] ?? [], true);
     }
 }

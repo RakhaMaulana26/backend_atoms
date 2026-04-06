@@ -119,8 +119,6 @@ class RosterController extends Controller
             // Include all employees (optimized - only essential fields)
             $allEmployees = \App\Models\Employee::with('user:id,name,email,grade')
                 ->where('is_active', true)
-                ->whereNotNull('group_number')
-                ->where('group_number', '>', 0)
                 ->orderBy('employee_type')
                 ->orderBy('group_number')
                 ->orderBy('user_id')
@@ -230,8 +228,6 @@ class RosterController extends Controller
         // Include all employees (reference data for frontend lookup)
         $allEmployees = \App\Models\Employee::with('user:id,name,email,grade')
             ->where('is_active', true)
-            ->whereNotNull('group_number')
-            ->where('group_number', '>', 0)
             ->orderBy('employee_type')
             ->orderBy('group_number')
             ->orderBy('user_id')
@@ -1285,6 +1281,314 @@ class RosterController extends Controller
             DB::rollBack();
             return response()->json([
                 'message' => 'Failed to batch update assignments',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * POST /rosters/{id}/groups/assign
+     * Assign CNS/Support employee into a group formation number
+     */
+    public function assignEmployeeToGroup(Request $request, $rosterId)
+    {
+        $validated = $request->validate([
+            'employee_id' => 'required|integer|exists:employees,id',
+            'group_number' => 'required|integer|min:1|max:20',
+            'employee_type' => 'required|string|in:CNS,Support',
+        ]);
+
+        DB::beginTransaction();
+        try {
+            $rosterPeriod = RosterPeriod::findOrFail($rosterId);
+
+            if ($rosterPeriod->isPublished()) {
+                return response()->json([
+                    'message' => 'Cannot modify published roster'
+                ], 400);
+            }
+
+            $employee = Employee::with('user:id,name,email,grade')
+                ->findOrFail($validated['employee_id']);
+
+            if ($employee->employee_type !== $validated['employee_type']) {
+                return response()->json([
+                    'message' => 'Employee type mismatch. Expected ' . $validated['employee_type'] . ', got ' . $employee->employee_type,
+                ], 422);
+            }
+
+            if (!in_array($employee->employee_type, ['CNS', 'Support'])) {
+                return response()->json([
+                    'message' => 'Only CNS or Support employees can be managed in group formation',
+                ], 422);
+            }
+
+            $oldGroup = $employee->group_number;
+            $employee->group_number = $validated['group_number'];
+            $employee->save();
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'update',
+                'module' => 'roster',
+                'reference_id' => $rosterId,
+                'description' => 'Assigned ' . $employee->user->name . ' (ID: ' . $employee->id . ') to ' . $employee->employee_type . ' group ' . $validated['group_number'] . ' (from group ' . ($oldGroup ?? 0) . ')',
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Employee assigned to group successfully',
+                'data' => [
+                    'employee_id' => $employee->id,
+                    'employee_name' => $employee->user->name,
+                    'employee_type' => $employee->employee_type,
+                    'old_group' => $oldGroup,
+                    'new_group' => $employee->group_number,
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to assign employee to group',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * DELETE /rosters/{id}/groups/{employeeId}
+     * Remove CNS/Support employee from group formation (set group_number to 0)
+     */
+    public function removeEmployeeFromGroup($rosterId, $employeeId)
+    {
+        DB::beginTransaction();
+        try {
+            $rosterPeriod = RosterPeriod::findOrFail($rosterId);
+
+            if ($rosterPeriod->isPublished()) {
+                return response()->json([
+                    'message' => 'Cannot modify published roster'
+                ], 400);
+            }
+
+            $employee = Employee::with('user:id,name,email,grade')
+                ->findOrFail($employeeId);
+
+            if (!in_array($employee->employee_type, ['CNS', 'Support'])) {
+                return response()->json([
+                    'message' => 'Only CNS or Support employees can be removed from group formation',
+                ], 422);
+            }
+
+            $oldGroup = $employee->group_number;
+            $employee->group_number = 0;
+            $employee->save();
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'update',
+                'module' => 'roster',
+                'reference_id' => $rosterId,
+                'description' => 'Removed ' . $employee->user->name . ' (ID: ' . $employee->id . ') from ' . $employee->employee_type . ' group formation (from group ' . ($oldGroup ?? 0) . ')',
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Employee removed from group successfully',
+                'data' => [
+                    'employee_id' => $employee->id,
+                    'employee_name' => $employee->user->name,
+                    'employee_type' => $employee->employee_type,
+                    'old_group' => $oldGroup,
+                    'new_group' => $employee->group_number,
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to remove employee from group',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * POST /rosters/{id}/managers/add
+     * Add an employee (grade 13-14) as manager for entire roster period (all days)
+     */
+    public function addManager(Request $request, $rosterId)
+    {
+        $validated = $request->validate([
+            'employee_id' => 'required|integer|exists:employees,id',
+        ]);
+
+        DB::beginTransaction();
+        try {
+            // Verify roster period exists
+            $rosterPeriod = RosterPeriod::findOrFail($rosterId);
+
+            // Check if roster is already published
+            if ($rosterPeriod->isPublished()) {
+                return response()->json([
+                    'message' => 'Cannot modify published roster'
+                ], 400);
+            }
+
+            // Verify employee exists and has valid grade (13-14)
+            $employee = Employee::with('user:id,name,email,grade')
+                ->findOrFail($validated['employee_id']);
+
+            $grade = $employee->user->grade;
+            if ($grade !== 13 && $grade !== 14) {
+                return response()->json([
+                    'message' => 'Only employees with grade 13-14 can be assigned as managers. This employee has grade ' . $grade,
+                ], 422);
+            }
+
+            // Get all roster days for this period
+            $rosterDays = RosterDay::where('roster_period_id', $rosterId)
+                ->select(['id', 'work_date'])
+                ->get();
+
+            // Add manager duty for all days
+            $createdCount = 0;
+            foreach ($rosterDays as $day) {
+                // Check if already manager for this day
+                $existing = ManagerDuty::where('roster_day_id', $day->id)
+                    ->where('employee_id', $validated['employee_id'])
+                    ->where('duty_type', 'Manager Teknik')
+                    ->exists();
+
+                if (!$existing) {
+                    // Get default shift (Morning shift - typically the first one)
+                    $defaultShift = Shift::whereRaw('LOWER(name) LIKE ?', ['%pagi%'])
+                        ->orWhereRaw('LOWER(name) LIKE ?', ['%morning%'])
+                        ->first();
+                    
+                    $shiftId = $defaultShift?->id ?? Shift::first()?->id ?? 1;
+
+                    ManagerDuty::create([
+                        'roster_day_id' => $day->id,
+                        'employee_id' => $validated['employee_id'],
+                        'duty_type' => 'Manager Teknik',
+                        'shift_id' => $shiftId,
+                    ]);
+
+                    $createdCount++;
+                }
+            }
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'create',
+                'module' => 'roster',
+                'reference_id' => $rosterId,
+                'description' => 'Added ' . $employee->user->name . ' (ID: ' . $validated['employee_id'] . ') as manager for ' . $createdCount . ' day(s)',
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Manager added successfully to ' . $createdCount . ' day(s)',
+                'data' => [
+                    'employee_id' => $validated['employee_id'],
+                    'employee_name' => $employee->user->name,
+                    'days_added' => $createdCount,
+                    'total_days' => $rosterDays->count(),
+                ],
+            ], 201);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to add manager',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * DELETE /rosters/{id}/managers/{employeeId}
+     * Remove an employee from manager role for entire roster period (all days)
+     */
+    public function removeManager($rosterId, $employeeId)
+    {
+        DB::beginTransaction();
+        try {
+            // Verify roster period exists
+            $rosterPeriod = RosterPeriod::findOrFail($rosterId);
+
+            // Check if roster is already published
+            if ($rosterPeriod->isPublished()) {
+                return response()->json([
+                    'message' => 'Cannot modify published roster'
+                ], 400);
+            }
+
+            // Verify employee exists
+            $employee = Employee::with('user:id,name,email,grade')
+                ->findOrFail($employeeId);
+
+            // Check if employee is a fixed manager (cannot be removed)
+            if ($employee->is_fixed_manager) {
+                return response()->json([
+                    'message' => 'Cannot remove ' . $employee->user->name . '. This employee is a fixed Manager Teknik and cannot be removed.',
+                    'error' => 'FIXED_MANAGER_CANNOT_REMOVE',
+                ], 403);
+            }
+
+            // Get all roster days for this period
+            $rosterDayIds = RosterDay::where('roster_period_id', $rosterId)
+                ->pluck('id')
+                ->toArray();
+
+            // Count existing manager duties to remove
+            $deletedCount = ManagerDuty::whereIn('roster_day_id', $rosterDayIds)
+                ->where('employee_id', $employeeId)
+                ->where('duty_type', 'Manager Teknik')
+                ->count();
+
+            // Delete all manager duties for this employee across all days
+            ManagerDuty::whereIn('roster_day_id', $rosterDayIds)
+                ->where('employee_id', $employeeId)
+                ->where('duty_type', 'Manager Teknik')
+                ->delete();
+
+            ActivityLog::create([
+                'user_id' => Auth::id(),
+                'action' => 'delete',
+                'module' => 'roster',
+                'reference_id' => $rosterId,
+                'description' => 'Removed ' . $employee->user->name . ' (ID: ' . $employeeId . ') from manager role for ' . $deletedCount . ' day(s)',
+            ]);
+
+            DB::commit();
+
+            CacheHelper::clearRosterCache();
+
+            return response()->json([
+                'message' => 'Manager removed successfully from ' . $deletedCount . ' day(s)',
+                'data' => [
+                    'employee_id' => $employeeId,
+                    'employee_name' => $employee->user->name,
+                    'days_removed' => $deletedCount,
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'Failed to remove manager',
                 'error' => $e->getMessage(),
             ], 500);
         }

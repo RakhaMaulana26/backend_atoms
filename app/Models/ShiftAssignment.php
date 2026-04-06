@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\ShiftResolverService;
 use App\Traits\HasAuditFields;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -84,36 +85,11 @@ class ShiftAssignment extends Model
     /**
      * Auto-resolve shift_id from notes if not set
      * Returns null for non-working days (leave, cuti, etc.)
+     * Uses centralized ShiftResolverService for consistency
      */
     public static function resolveShiftIdFromNotes(string $notes): ?int
     {
-        $notesUpper = strtoupper(trim($notes));
-        
-        // For non-working days, return null (no shift_id)
-        if (in_array($notesUpper, self::$nonWorkingNotes)) {
-            return null;
-        }
-        
-        // Check if it's a leave-like note using prefix/contains
-        $notesLower = strtolower(trim($notes));
-        if ((str_starts_with($notesLower, 'l') && strlen($notesLower) <= 2) || // L, L1, L2
-            str_contains($notesLower, 'libur') ||
-            str_contains($notesLower, 'cuti') ||
-            str_contains($notesLower, 'off')) {
-            return null;
-        }
-        
-        // For working shifts, try to find the shift
-        $shiftName = self::$notesToShiftMap[$notesUpper] ?? null;
-        
-        if (!$shiftName) {
-            // Try direct match with shift name
-            $shift = Shift::whereRaw('LOWER(name) = ?', [$notesLower])->first();
-            return $shift?->id;
-        }
-        
-        $shift = Shift::whereRaw('LOWER(name) = ?', [strtolower($shiftName)])->first();
-        return $shift?->id;
+        return ShiftResolverService::resolveShiftId($notes);
     }
 
     public function rosterDay()

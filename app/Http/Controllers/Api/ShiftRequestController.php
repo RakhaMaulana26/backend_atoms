@@ -8,14 +8,18 @@ use App\Models\ActivityLog;
 use App\Models\Employee;
 use App\Models\ManagerDuty;
 use App\Models\Notification;
+use App\Models\RosterDay;
+use App\Models\Shift;
 use App\Models\ShiftRequest;
 use App\Models\ShiftAssignment;
 use App\Models\RosterPeriod;
 use App\Models\User;
+use App\Services\ShiftResolverService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 
 class ShiftRequestController extends Controller
 {
@@ -27,6 +31,7 @@ class ShiftRequestController extends Controller
     {
         $user = Auth::user();
         $employee = $user->employee;
+        $rosterPeriodId = $request->integer('roster_period_id');
 
         $query = ShiftRequest::with([
             'requesterEmployee.user',
@@ -40,8 +45,11 @@ class ShiftRequestController extends Controller
             $query->where('status', $request->status);
         }
 
-        // Check if current user is a manager employee by role (no hardcoded IDs)
-        $isManagerEmployee = $employee && in_array($user->role, [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER]);
+        // Manager approver can be role-based manager OR temporary manager on duty (manager_duties)
+        $isManagerEmployee = $employee && (
+            in_array($user->role, [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])
+            || $this->hasManagerDutyInRosterPeriod($employee->id, $rosterPeriodId)
+        );
         $isAdminRole = in_array($user->role, [User::ROLE_ADMIN, User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER]);
 
         // Filter based on role and type parameter
@@ -71,6 +79,20 @@ class ShiftRequestController extends Controller
                             ->whereColumn('shift_assignments.roster_day_id', 'shift_requests.to_roster_day_id')
                             ->whereRaw('LOWER(TRIM(shift_assignments.notes)) = LOWER(TRIM(shift_requests.target_notes))')
                             ->where('shift_assignments.employee_id', $employee->id);
+                    })
+                    // Temporary manager on duty for requester day
+                    ->orWhereExists(function ($subQ) use ($employee) {
+                        $subQ->select(DB::raw(1))
+                            ->from('manager_duties')
+                            ->whereColumn('manager_duties.roster_day_id', 'shift_requests.from_roster_day_id')
+                            ->where('manager_duties.employee_id', $employee->id);
+                    })
+                    // Temporary manager on duty for target day
+                    ->orWhereExists(function ($subQ) use ($employee) {
+                        $subQ->select(DB::raw(1))
+                            ->from('manager_duties')
+                            ->whereColumn('manager_duties.roster_day_id', 'shift_requests.to_roster_day_id')
+                            ->where('manager_duties.employee_id', $employee->id);
                     });
 
                 // General Manager can see manager-to-manager requests directly.
@@ -138,17 +160,20 @@ class ShiftRequestController extends Controller
                     return $requestArray;
                 }
 
-                // Check if current manager works same shift as requester on from_roster_day
-                $isFromManager = ShiftAssignment::where('roster_day_id', $request->from_roster_day_id)
-                    ->where('employee_id', $employee->id)
-                    ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($request->requester_notes ?? ''))])
-                    ->exists();
-                
-                // Check if current manager works same shift as target on to_roster_day
-                $isToManager = ShiftAssignment::where('roster_day_id', $request->to_roster_day_id)
-                    ->where('employee_id', $employee->id)
-                    ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($request->target_notes ?? ''))])
-                    ->exists();
+                $fromManagerDuty = $this->resolveManagerDutyForContext(
+                    (int) $request->from_roster_day_id,
+                    (string) $request->requester_notes,
+                    $request->requesterEmployee?->group_number
+                );
+
+                $toManagerDuty = $this->resolveManagerDutyForContext(
+                    (int) $request->to_roster_day_id,
+                    (string) $request->target_notes,
+                    $request->targetEmployee?->group_number
+                );
+
+                $isFromManager = $fromManagerDuty && (int) $fromManagerDuty->employee_id === (int) $employee->id;
+                $isToManager = $toManagerDuty && (int) $toManagerDuty->employee_id === (int) $employee->id;
                 
                 // Can approve if:
                 // - Is from_manager AND from_manager hasn't approved yet
@@ -213,25 +238,56 @@ class ShiftRequestController extends Controller
             }
         }
 
+        // Temporary manager assigned on related roster context can also view detail.
+        if (!$canView && $employee) {
+            $fromManagerDuty = $this->resolveManagerDutyForContext(
+                (int) $shiftRequest->from_roster_day_id,
+                (string) $shiftRequest->requester_notes,
+                $shiftRequest->requesterEmployee?->group_number
+            );
+
+            $toManagerDuty = $this->resolveManagerDutyForContext(
+                (int) $shiftRequest->to_roster_day_id,
+                (string) $shiftRequest->target_notes,
+                $shiftRequest->targetEmployee?->group_number
+            );
+
+            $canView = (
+                ($fromManagerDuty && (int) $fromManagerDuty->employee_id === (int) $employee->id)
+                || ($toManagerDuty && (int) $toManagerDuty->employee_id === (int) $employee->id)
+            );
+        }
+
         if (!$canView) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 
-        // Add manager info
-        $managers = $shiftRequest->getInvolvedManagers();
+        $fromManagerDuty = $this->resolveManagerDutyForContext(
+            (int) $shiftRequest->from_roster_day_id,
+            (string) $shiftRequest->requester_notes,
+            $shiftRequest->requesterEmployee?->group_number
+        );
+
+        $toManagerDuty = $this->resolveManagerDutyForContext(
+            (int) $shiftRequest->to_roster_day_id,
+            (string) $shiftRequest->target_notes,
+            $shiftRequest->targetEmployee?->group_number
+        );
 
         return response()->json([
             'data' => $shiftRequest,
             'managers' => [
-                'from_manager' => isset($managers['from_manager']) ? [
-                    'id' => $managers['from_manager']->employee_id,
-                    'name' => $managers['from_manager']->employee->user->name ?? 'N/A',
+                'from_manager' => $fromManagerDuty ? [
+                    'id' => $fromManagerDuty->employee_id,
+                    'name' => $fromManagerDuty->employee->user->name ?? 'N/A',
                 ] : null,
-                'to_manager' => isset($managers['to_manager']) ? [
-                    'id' => $managers['to_manager']->employee_id,
-                    'name' => $managers['to_manager']->employee->user->name ?? 'N/A',
+                'to_manager' => $toManagerDuty ? [
+                    'id' => $toManagerDuty->employee_id,
+                    'name' => $toManagerDuty->employee->user->name ?? 'N/A',
                 ] : null,
-                'is_same_manager' => $shiftRequest->hasSameManager(),
+                'is_same_manager' => $fromManagerDuty && $toManagerDuty
+                    ? ((int) $fromManagerDuty->employee_id === (int) $toManagerDuty->employee_id)
+                    : false,
             ],
         ]);
     }
@@ -244,6 +300,18 @@ class ShiftRequestController extends Controller
     {
         $requesterEmployee = Auth::user()->employee;
         $validated = $request->validated();
+
+        Log::info('[shift_request][create] Incoming swap request', [
+            'requester_employee_id' => $requesterEmployee?->id,
+            'requester_user_id' => Auth::id(),
+            'requester_name' => Auth::user()?->name,
+            'requester_email' => Auth::user()?->email,
+            'target_employee_id' => $validated['target_employee_id'] ?? null,
+            'from_roster_day_id' => $validated['from_roster_day_id'] ?? null,
+            'to_roster_day_id' => $validated['to_roster_day_id'] ?? null,
+            'requester_notes' => $validated['requester_notes'] ?? null,
+            'target_notes' => $validated['target_notes'] ?? null,
+        ]);
 
         DB::beginTransaction();
         try {
@@ -285,6 +353,16 @@ class ShiftRequestController extends Controller
                 'reference_id' => $shiftRequest->id,
             ]);
 
+            Log::info('[shift_request][notify] Target notification created', [
+                'shift_request_id' => $shiftRequest->id,
+                'recipient_user_id' => $targetEmployee->user_id,
+                'recipient_employee_id' => $targetEmployee->id,
+                'recipient_name' => $targetEmployee->user?->name,
+                'recipient_email' => $targetEmployee->user?->email,
+                'recipient_role' => $targetEmployee->user?->role,
+                'channel' => 'in-app',
+            ]);
+
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => 'create',
@@ -295,6 +373,12 @@ class ShiftRequestController extends Controller
 
             // Notify managers immediately when request is submitted
             $this->notifyManagers($shiftRequest);
+
+            Log::info('[shift_request][create] Swap request committed', [
+                'shift_request_id' => $shiftRequest->id,
+                'requester_user_id' => Auth::id(),
+                'target_user_id' => $targetEmployee->user_id,
+            ]);
 
             DB::commit();
 
@@ -409,13 +493,6 @@ class ShiftRequestController extends Controller
         $user = Auth::user();
         $employee = $user->employee;
 
-        // Must be a manager
-        if (!in_array($user->role, [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])) {
-            return response()->json([
-                'message' => 'Hanya manager yang dapat menyetujui permintaan ini'
-            ], 403);
-        }
-
         if ($shiftRequest->status !== ShiftRequest::STATUS_PENDING) {
             return response()->json([
                 'message' => 'Permintaan ini tidak dapat disetujui'
@@ -481,17 +558,20 @@ class ShiftRequestController extends Controller
             }
         }
 
-        // Check if this manager works the SAME shift as requester (from_roster_day)
-        $isFromManager = ShiftAssignment::where('roster_day_id', $shiftRequest->from_roster_day_id)
-            ->where('employee_id', $employee->id)
-            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($shiftRequest->requester_notes ?? ''))])
-            ->exists();
+        $fromManagerDuty = $this->resolveManagerDutyForContext(
+            (int) $shiftRequest->from_roster_day_id,
+            (string) $shiftRequest->requester_notes,
+            $shiftRequest->requesterEmployee?->group_number
+        );
 
-        // Check if this manager works the SAME shift as target (to_roster_day)
-        $isToManager = ShiftAssignment::where('roster_day_id', $shiftRequest->to_roster_day_id)
-            ->where('employee_id', $employee->id)
-            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($shiftRequest->target_notes ?? ''))])
-            ->exists();
+        $toManagerDuty = $this->resolveManagerDutyForContext(
+            (int) $shiftRequest->to_roster_day_id,
+            (string) $shiftRequest->target_notes,
+            $shiftRequest->targetEmployee?->group_number
+        );
+
+        $isFromManager = $fromManagerDuty && (int) $fromManagerDuty->employee_id === (int) $employee->id;
+        $isToManager = $toManagerDuty && (int) $toManagerDuty->employee_id === (int) $employee->id;
 
         \Log::info('approveByManager check', [
             'employee_id' => $employee->id,
@@ -499,6 +579,8 @@ class ShiftRequestController extends Controller
             'isToManager' => $isToManager,
             'requester_notes' => $shiftRequest->requester_notes,
             'target_notes' => $shiftRequest->target_notes,
+            'from_manager_employee_id' => $fromManagerDuty?->employee_id,
+            'to_manager_employee_id' => $toManagerDuty?->employee_id,
         ]);
 
         if (!$isFromManager && !$isToManager) {
@@ -510,7 +592,9 @@ class ShiftRequestController extends Controller
         DB::beginTransaction();
         try {
             // Check if same manager handles both shifts
-            $isSameManager = $shiftRequest->hasSameManager();
+            $isSameManager = $fromManagerDuty
+                && $toManagerDuty
+                && (int) $fromManagerDuty->employee_id === (int) $toManagerDuty->employee_id;
 
             if ($isSameManager) {
                 // Single manager approval - approve both at once
@@ -596,21 +680,25 @@ class ShiftRequestController extends Controller
             $canReject = true;
         }
 
-        // Manager can reject - check if manager works the SAME shift
-        if (in_array($user->role, [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])) {
-            // Check if this manager works the SAME shift as requester
-            $isFromManager = ShiftAssignment::where('roster_day_id', $shiftRequest->from_roster_day_id)
-                ->where('employee_id', $employee->id)
-                ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($shiftRequest->requester_notes ?? ''))])
-                ->exists();
+        // Manager can reject if currently assigned as manager duty on involved shift/date
+        if ($employee) {
+            $requesterShiftId = $shiftRequest->getRequesterShiftId();
+            $targetShiftId = $shiftRequest->getTargetShiftId();
 
-            // Check if this manager works the SAME shift as target
-            $isToManager = ShiftAssignment::where('roster_day_id', $shiftRequest->to_roster_day_id)
-                ->where('employee_id', $employee->id)
-                ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($shiftRequest->target_notes ?? ''))])
-                ->exists();
+            $isFromManager = $requesterShiftId
+                ? ManagerDuty::where('roster_day_id', $shiftRequest->from_roster_day_id)
+                    ->where('employee_id', $employee->id)
+                    ->where('shift_id', $requesterShiftId)
+                    ->exists()
+                : false;
 
-            // NO fallback - only managers with matching shifts can reject
+            $isToManager = $targetShiftId
+                ? ManagerDuty::where('roster_day_id', $shiftRequest->to_roster_day_id)
+                    ->where('employee_id', $employee->id)
+                    ->where('shift_id', $targetShiftId)
+                    ->exists()
+                : false;
+
             if ($isFromManager || $isToManager) {
                 $canReject = true;
             }
@@ -767,11 +855,88 @@ class ShiftRequestController extends Controller
      */
     private function isManagerToManagerSwap(ShiftRequest $shiftRequest): bool
     {
-        $requesterRole = $shiftRequest->requesterEmployee?->user?->role;
-        $targetRole = $shiftRequest->targetEmployee?->user?->role;
+        $requesterRole = $this->normalizeRole($shiftRequest->requesterEmployee?->user?->role);
+        $targetRole = $this->normalizeRole($shiftRequest->targetEmployee?->user?->role);
+        $managerTeknikRole = $this->normalizeRole(User::ROLE_MANAGER_TEKNIK);
 
-        return $requesterRole === User::ROLE_MANAGER_TEKNIK
-            && $targetRole === User::ROLE_MANAGER_TEKNIK;
+        return $requesterRole === $managerTeknikRole
+            && $targetRole === $managerTeknikRole;
+    }
+
+    private function normalizeRole(?string $role): string
+    {
+        if (!$role) {
+            return '';
+        }
+
+        $collapsed = preg_replace('/\s+/', ' ', trim($role));
+        return mb_strtolower($collapsed ?? '');
+    }
+
+    /**
+     * Map shift notes (P, S, M, L, etc.) to shift_id using centralized service
+     */
+    private function getShiftIdFromNotes(?string $notes): ?int
+    {
+        return ShiftResolverService::resolveShiftId($notes);
+    }
+
+    private function resolveManagerDutyForContext(int $rosterDayId, string $notes, ?int $groupNumber = null): ?ManagerDuty
+    {
+        $normalizedNotes = strtolower(trim($notes));
+        $shiftId = ShiftResolverService::resolveShiftId($notes);
+
+        $byAssignmentSameGroup = ManagerDuty::query()
+            ->where('roster_day_id', $rosterDayId)
+            ->with(['employee.user'])
+            ->whereHas('employee.shiftAssignments', function ($shiftAssignmentQuery) use ($rosterDayId, $normalizedNotes) {
+                $shiftAssignmentQuery->where('roster_day_id', $rosterDayId)
+                    ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes]);
+            })
+            ->when($groupNumber !== null, function ($q) use ($groupNumber) {
+                $q->whereHas('employee', function ($employeeQuery) use ($groupNumber) {
+                    $employeeQuery->where('group_number', $groupNumber);
+                });
+            })
+            ->first();
+
+        if ($byAssignmentSameGroup) {
+            return $byAssignmentSameGroup;
+        }
+
+        $byAssignmentAnyGroup = ManagerDuty::query()
+            ->where('roster_day_id', $rosterDayId)
+            ->with(['employee.user'])
+            ->whereHas('employee.shiftAssignments', function ($shiftAssignmentQuery) use ($rosterDayId, $normalizedNotes) {
+                $shiftAssignmentQuery->where('roster_day_id', $rosterDayId)
+                    ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes]);
+            })
+            ->first();
+
+        if ($byAssignmentAnyGroup) {
+            return $byAssignmentAnyGroup;
+        }
+
+        if (!$shiftId) {
+            return null;
+        }
+
+        $exactShiftCandidates = ManagerDuty::query()
+            ->where('roster_day_id', $rosterDayId)
+            ->where('shift_id', $shiftId)
+            ->with(['employee.user'])
+            ->when($groupNumber !== null, function ($q) use ($groupNumber) {
+                $q->whereHas('employee', function ($employeeQuery) use ($groupNumber) {
+                    $employeeQuery->where('group_number', $groupNumber);
+                });
+            })
+            ->get();
+
+        if ($exactShiftCandidates->count() === 1) {
+            return $exactShiftCandidates->first();
+        }
+
+        return null;
     }
 
     /**
@@ -779,7 +944,7 @@ class ShiftRequestController extends Controller
      */
     private function notifyManagers(ShiftRequest $shiftRequest): void
     {
-        \Log::info('notifyManagers CALLED', [
+        Log::info('[shift_request][notify_manager] Called', [
             'shift_request_id' => $shiftRequest->id,
             'time' => now()->toDateTimeString(),
         ]);
@@ -804,66 +969,72 @@ class ShiftRequestController extends Controller
             }
 
             if (empty($managersToNotify)) {
-                \Log::error('No General Manager found for manager-to-manager shift request', [
+                Log::error('[shift_request][notify_manager] No General Manager found for manager-to-manager shift request', [
                     'shift_request_id' => $shiftRequest->id,
                 ]);
                 return;
             }
         }
 
-        $managerEmployeeIds = $this->getManagerEmployeeIds();
-
         if (empty($managersToNotify)) {
-            // Find manager working on requester's roster_day with the SAME shift (notes)
-            $fromManager = ShiftAssignment::where('roster_day_id', $shiftRequest->from_roster_day_id)
-                ->whereIn('employee_id', $managerEmployeeIds)
-                ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($shiftRequest->requester_notes ?? ''))])
-                ->with('employee.user')
-                ->first();
+            // Source of truth: resolve manager by roster day + shift notes context
+            $fromManager = $this->resolveManagerDutyForContext(
+                (int) $shiftRequest->from_roster_day_id,
+                (string) $shiftRequest->requester_notes,
+                $shiftRequest->requesterEmployee?->group_number
+            );
+            $toManager = $this->resolveManagerDutyForContext(
+                (int) $shiftRequest->to_roster_day_id,
+                (string) $shiftRequest->target_notes,
+                $shiftRequest->targetEmployee?->group_number
+            );
 
             if ($fromManager && $fromManager->employee && $fromManager->employee->user) {
                 $managersToNotify[$fromManager->employee->user_id] = $fromManager->employee->user;
-                \Log::info('Found from_manager', [
+                Log::info('[shift_request][notify_manager] Found from_manager', [
                     'employee_id' => $fromManager->employee_id,
                     'user_id' => $fromManager->employee->user_id,
                     'name' => $fromManager->employee->user->name,
-                    'notes' => $fromManager->notes,
+                    'email' => $fromManager->employee->user->email,
                 ]);
             }
-
-            // Find manager working on target's roster_day with the SAME shift (notes)
-            $toManager = ShiftAssignment::where('roster_day_id', $shiftRequest->to_roster_day_id)
-                ->whereIn('employee_id', $managerEmployeeIds)
-                ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($shiftRequest->target_notes ?? ''))])
-                ->with('employee.user')
-                ->first();
 
             if ($toManager && $toManager->employee && $toManager->employee->user) {
                 // Add only if different from fromManager
                 if (!isset($managersToNotify[$toManager->employee->user_id])) {
                     $managersToNotify[$toManager->employee->user_id] = $toManager->employee->user;
-                    \Log::info('Found to_manager', [
+                    Log::info('[shift_request][notify_manager] Found to_manager', [
                         'employee_id' => $toManager->employee_id,
                         'user_id' => $toManager->employee->user_id,
                         'name' => $toManager->employee->user->name,
-                        'notes' => $toManager->notes,
+                        'email' => $toManager->employee->user->email,
                     ]);
                 }
             }
         }
 
-        \Log::info('notifyManagers - managers found', [
+        Log::info('[shift_request][notify_manager] Candidate managers resolved', [
             'shift_request_id' => $shiftRequest->id,
             'from_roster_day_id' => $shiftRequest->from_roster_day_id,
             'to_roster_day_id' => $shiftRequest->to_roster_day_id,
             'requester_notes' => $shiftRequest->requester_notes,
             'target_notes' => $shiftRequest->target_notes,
             'managers_count' => count($managersToNotify),
+            'recipients' => collect($managersToNotify)->map(function ($user) {
+                return [
+                    'user_id' => $user->id,
+                    'name' => $user->name,
+                    'email' => $user->email,
+                    'role' => $user->role,
+                ];
+            })->values()->all(),
         ]);
 
         // Fallback: if no specific managers found, notify all manager employees by role
         if (empty($managersToNotify)) {
-            \Log::warning('No specific shift managers found, notifying all manager employees');
+            Log::warning('[shift_request][notify_manager] No specific shift managers found, notifying all manager employees');
+
+            $managerEmployeeIds = $this->getManagerEmployeeIds();
             
             $managerEmployees = Employee::whereIn('id', $managerEmployeeIds)
                 ->with('user')
@@ -877,7 +1048,7 @@ class ShiftRequestController extends Controller
         }
 
         if (empty($managersToNotify)) {
-            \Log::error('No managers found at all for shift request', [
+            Log::error('[shift_request][notify_manager] No managers found at all for shift request', [
                 'shift_request_id' => $shiftRequest->id,
             ]);
             return;
@@ -892,9 +1063,11 @@ class ShiftRequestController extends Controller
 
         // Send notifications
         foreach ($managersToNotify as $userId => $user) {
-            \Log::info('Creating notification for manager', [
+            Log::info('[shift_request][notify_manager] Creating notification for manager', [
                 'manager_user_id' => $userId,
                 'manager_name' => $user->name,
+                'manager_email' => $user->email,
+                'manager_role' => $user->role,
             ]);
 
             $notification = Notification::create([
@@ -906,14 +1079,15 @@ class ShiftRequestController extends Controller
                 'reference_id' => $shiftRequest->id,
             ]);
 
-            \Log::info('Manager notification CREATED', [
+            Log::info('[shift_request][notify_manager] Manager notification created', [
                 'notification_id' => $notification->id,
                 'manager_user_id' => $userId,
                 'shift_request_id' => $shiftRequest->id,
+                'manager_email' => $user->email,
             ]);
         }
 
-        \Log::info('notifyManagers COMPLETED', [
+        Log::info('[shift_request][notify_manager] Completed', [
             'shift_request_id' => $shiftRequest->id,
             'notifications_created' => count($managersToNotify),
         ]);
@@ -1120,6 +1294,16 @@ class ShiftRequestController extends Controller
         ]);
 
         $currentEmployee = Auth::user()->employee;
+        $currentUserGrade = Auth::user()->grade !== null ? (int) Auth::user()->grade : null;
+        $allowedSwapGrades = $this->getAllowedSwapGradesForRequester($currentUserGrade);
+
+        if (empty($allowedSwapGrades)) {
+            return response()->json([
+                'data' => [],
+                'count' => 0,
+                'message' => 'Kelas jabatan akun Anda belum diatur. Hubungi admin untuk mengisi grade.',
+            ]);
+        }
 
         if (!$currentEmployee) {
             return response()->json([
@@ -1206,9 +1390,20 @@ class ShiftRequestController extends Controller
         }
 
         // Filter by same role (employee_type)
-        $query->whereHas('employee', function ($q) use ($currentEmployee) {
+        $query->whereHas('employee', function ($q) use ($currentEmployee, $allowedSwapGrades) {
             $q->where('employee_type', $currentEmployee->employee_type)
                 ->where('is_active', true);
+
+            // Apply grade compatibility filter:
+            // - Same grade is always allowed
+            // - Special cross-grade pairs: 14<->13, 12<->11
+            // - Grade group 8,9,10 can swap with each other
+            // - Grade 15 can only swap with the same grade
+            if (!empty($allowedSwapGrades)) {
+                $q->whereHas('user', function ($uq) use ($allowedSwapGrades) {
+                    $uq->whereIn('grade', $allowedSwapGrades);
+                });
+            }
         });
 
         $assignments = $query->get()->filter(function ($assignment) use ($fromRosterDayId, $offDayNotes) {
@@ -1245,6 +1440,7 @@ class ShiftRequestController extends Controller
             return [
                 'employee_id' => $assignment->employee_id,
                 'employee_name' => $assignment->employee->user->name,
+                'grade' => $assignment->employee->user->grade,
                 'employee_type' => $assignment->employee->employee_type,
                 'group_number' => $assignment->employee->group_number,
                 'roster_day_id' => $assignment->roster_day_id,
@@ -1262,6 +1458,7 @@ class ShiftRequestController extends Controller
             return [
                 'employee_id' => (int) $employeeId,
                 'employee_name' => $first['employee_name'],
+                'grade' => $first['grade'],
                 'employee_type' => $first['employee_type'],
                 'group_number' => $first['group_number'],
                 'available_shifts' => $items->map(function ($item) {
@@ -1281,6 +1478,33 @@ class ShiftRequestController extends Controller
             'data' => $grouped,
             'count' => $grouped->count(),
         ]);
+    }
+
+    /**
+     * Get allowed target grades for swap based on requester grade.
+     */
+    private function getAllowedSwapGradesForRequester(?int $requesterGrade): array
+    {
+        if ($requesterGrade === null) {
+            return [];
+        }
+
+        $allowedGrades = [$requesterGrade];
+        $crossGradePairs = [
+            14 => [13],
+            13 => [14],
+            12 => [11],
+            11 => [12],
+            8 => [9, 10],
+            9 => [8, 10],
+            10 => [8, 9],
+        ];
+
+        if (isset($crossGradePairs[$requesterGrade])) {
+            $allowedGrades = array_merge($allowedGrades, $crossGradePairs[$requesterGrade]);
+        }
+
+        return array_values(array_unique($allowedGrades));
     }
 
     /**
@@ -1345,6 +1569,7 @@ class ShiftRequestController extends Controller
     /**
      * GET /shift-requests/manager-for-shift
      * Get manager on duty for a specific roster day and shift (notes)
+     * Priority: 1) Manager duties (temporary), 2) Fixed manager from SAME GROUP, 3) Other managers
      */
     public function getManagerForShift(Request $request)
     {
@@ -1356,29 +1581,274 @@ class ShiftRequestController extends Controller
         $rosterDayId = $request->get('roster_day_id');
         $notes = $request->get('notes');
 
-        // Find manager working on this roster_day with the SAME shift (notes)
+        // Get authenticated user's group
+        $authUser = Auth::user();
+        $userEmployee = $authUser->employee;
+        $userGroupNumber = $userEmployee ? $userEmployee->group_number : null;
+
+        \Log::info('[getManagerForShift] Starting', [
+            'roster_day_id' => $rosterDayId,
+            'notes' => $notes,
+            'user_group_number' => $userGroupNumber,
+            'user_id' => $authUser->id,
+        ]);
+
+        // Get the roster day
+        $rosterDay = RosterDay::find($rosterDayId);
+        if (!$rosterDay) {
+            \Log::warning('[getManagerForShift] Roster day not found', ['roster_day_id' => $rosterDayId]);
+            return response()->json([
+                'data' => null,
+                'message' => 'Roster day tidak ditemukan',
+            ]);
+        }
+
+        // Map notes to shift_id using centralized service
+        $shiftId = ShiftResolverService::resolveShiftId($notes);
+        if (!$shiftId) {
+            \Log::warning('[getManagerForShift] Could not resolve shift_id from notes', ['notes' => $notes]);
+            return response()->json([
+                'data' => null,
+                'message' => 'Shift tidak ditemukan dari notes',
+            ]);
+        }
+
+        \Log::info('[getManagerForShift] Resolved shift_id', [
+            'notes' => $notes,
+            'shift_id' => $shiftId,
+            'user_group' => $userGroupNumber,
+        ]);
+
+        // Priority 1: Check temporary manager from manager_duties.
+        // Some imported rosters have manager_duties.shift_id that does not match the actual daily shift,
+        // so we use two strategies: exact shift_id first, then fallback via same-day shift_assignments.
+        $normalizedNotes = strtolower(trim($notes));
+
+        $managerDutyExactShift = null;
+
+        $managerDutyByAssignment = ManagerDuty::query()
+            ->where('roster_day_id', $rosterDayId)
+            ->with(['employee.user'])
+            ->whereHas('employee.shiftAssignments', function ($shiftAssignmentQuery) use ($rosterDayId, $normalizedNotes) {
+                $shiftAssignmentQuery->where('roster_day_id', $rosterDayId)
+                    ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes]);
+            })
+            ->when($userGroupNumber !== null, function ($q) use ($userGroupNumber) {
+                $q->whereHas('employee', function ($employeeQuery) use ($userGroupNumber) {
+                    $employeeQuery->where('group_number', $userGroupNumber);
+                });
+            })
+            ->first();
+
+        if (!$managerDutyByAssignment) {
+            $managerDutyByAssignment = ManagerDuty::query()
+                ->where('roster_day_id', $rosterDayId)
+                ->with(['employee.user'])
+                ->whereHas('employee.shiftAssignments', function ($shiftAssignmentQuery) use ($rosterDayId, $normalizedNotes) {
+                    $shiftAssignmentQuery->where('roster_day_id', $rosterDayId)
+                        ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes]);
+                })
+                ->first();
+        }
+
+        // IMPORTANT:
+        // Prefer manager_duties + shift_assignments match first.
+        // Some imported roster files store manager_duties.shift_id inconsistently,
+        // which can cause wrong manager selection if exact shift_id is used blindly.
+        if (!$managerDutyByAssignment) {
+            $exactShiftCandidates = ManagerDuty::query()
+                ->where('roster_day_id', $rosterDayId)
+                ->where('shift_id', $shiftId)
+                ->with(['employee.user'])
+                ->when($userGroupNumber !== null, function ($q) use ($userGroupNumber) {
+                    $q->whereHas('employee', function ($employeeQuery) use ($userGroupNumber) {
+                        $employeeQuery->where('group_number', $userGroupNumber);
+                    });
+                })
+                ->get();
+
+            // Only allow exact-shift fallback when there is exactly one candidate.
+            if ($exactShiftCandidates->count() === 1) {
+                $managerDutyExactShift = $exactShiftCandidates->first();
+            }
+        }
+
+        $managerDuty = $managerDutyByAssignment ?: $managerDutyExactShift;
+
+        if ($managerDuty && $managerDuty->employee && $managerDuty->employee->user) {
+            \Log::info('[getManagerForShift] Found temporary manager via manager_duties', [
+                'roster_day_id' => $rosterDayId,
+                'shift_id' => $shiftId,
+                'notes' => $notes,
+                'user_group' => $userGroupNumber,
+                'match_strategy' => $managerDutyExactShift ? 'manager_duties.shift_id' : 'manager_duties + shift_assignments.notes',
+                'employee_id' => $managerDuty->employee_id,
+                'employee_name' => $managerDuty->employee->user->name,
+                'employee_group' => $managerDuty->employee->group_number,
+                'duty_type' => $managerDuty->duty_type,
+            ]);
+
+            return response()->json([
+                'data' => [
+                    'employee_id' => $managerDuty->employee_id,
+                    'user_id' => $managerDuty->employee->user_id,
+                    'name' => $managerDuty->employee->user->name,
+                    'notes' => $notes,
+                    'is_temporary' => true,
+                    'duty_type' => $managerDuty->duty_type,
+                    'group_number' => $managerDuty->employee->group_number,
+                ],
+            ]);
+        }
+
+        \Log::info('[getManagerForShift] No temporary manager found, checking fixed manager', [
+            'roster_day_id' => $rosterDayId,
+            'shift_id' => $shiftId,
+            'user_group' => $userGroupNumber,
+        ]);
+
+        // Priority 2a: Check fixed manager from SAME GROUP first
+        if ($userGroupNumber !== null) {
+            \Log::info('[getManagerForShift] Checking same-group managers', [
+                'user_group' => $userGroupNumber,
+            ]);
+
+            $sameGroupManager = ShiftAssignment::where('roster_day_id', $rosterDayId)
+                ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($notes))])
+                ->with(['employee.user'])
+                ->whereHas('employee', function ($q) use ($userGroupNumber) {
+                    $q->where('group_number', $userGroupNumber)
+                        ->whereHas('user', function ($userQuery) {
+                            $userQuery->whereIn('role', [
+                                User::ROLE_MANAGER_TEKNIK,
+                                User::ROLE_GENERAL_MANAGER,
+                            ]);
+                        });
+                })
+                ->first();
+
+            if ($sameGroupManager && $sameGroupManager->employee && $sameGroupManager->employee->user) {
+                \Log::info('[getManagerForShift] Found manager from SAME GROUP via ShiftAssignment', [
+                    'roster_day_id' => $rosterDayId,
+                    'notes' => $notes,
+                    'user_group' => $userGroupNumber,
+                    'employee_id' => $sameGroupManager->employee_id,
+                    'employee_name' => $sameGroupManager->employee->user->name,
+                    'employee_group' => $sameGroupManager->employee->group_number,
+                    'employee_type' => $sameGroupManager->employee->employee_type,
+                ]);
+
+                return response()->json([
+                    'data' => [
+                        'employee_id' => $sameGroupManager->employee_id,
+                        'user_id' => $sameGroupManager->employee->user_id,
+                        'name' => $sameGroupManager->employee->user->name,
+                        'notes' => $sameGroupManager->notes,
+                        'is_temporary' => false,
+                        'employee_type' => $sameGroupManager->employee->employee_type,
+                        'group_number' => $sameGroupManager->employee->group_number,
+                    ],
+                ]);
+            }
+
+            \Log::info('[getManagerForShift] No same-group manager found, trying other managers', [
+                'user_group' => $userGroupNumber,
+            ]);
+        }
+
+        // Priority 2b: Fall back to ANY Manager Teknik or General Manager with matching shift
         $managerEmployeeIds = $this->getManagerEmployeeIds();
         $manager = ShiftAssignment::where('roster_day_id', $rosterDayId)
             ->whereIn('employee_id', $managerEmployeeIds)
-            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($notes ?? ''))])
-            ->with('employee.user')
+            ->whereRaw('LOWER(TRIM(notes)) = ?', [strtolower(trim($notes))])
+            ->with(['employee.user'])
             ->first();
 
         if ($manager && $manager->employee && $manager->employee->user) {
+            \Log::info('[getManagerForShift] Found manager from ANY group via ShiftAssignment', [
+                'roster_day_id' => $rosterDayId,
+                'notes' => $notes,
+                'user_group' => $userGroupNumber,
+                'employee_id' => $manager->employee_id,
+                'employee_name' => $manager->employee->user->name,
+                'employee_group' => $manager->employee->group_number,
+                'employee_type' => $manager->employee->employee_type,
+                'is_same_group' => $manager->employee->group_number === $userGroupNumber,
+            ]);
+
             return response()->json([
                 'data' => [
                     'employee_id' => $manager->employee_id,
                     'user_id' => $manager->employee->user_id,
                     'name' => $manager->employee->user->name,
                     'notes' => $manager->notes,
+                    'is_temporary' => false,
+                    'employee_type' => $manager->employee->employee_type,
+                    'group_number' => $manager->employee->group_number,
                 ],
             ]);
         }
 
         // If no manager found for this shift, return null
+        \Log::warning('[getManagerForShift] No manager found', [
+            'roster_day_id' => $rosterDayId,
+            'notes' => $notes,
+            'shift_id' => $shiftId,
+            'user_group' => $userGroupNumber,
+        ]);
+
         return response()->json([
             'data' => null,
             'message' => 'Tidak ada manager yang bertugas pada shift ini',
         ]);
+    }
+
+    /**
+     * GET /shift-requests/check-manager-status
+     * Check if current user is a manager (by role or by temporary duty assignment)
+     * Returns has_manager_duties flag for current roster period being viewed
+     */
+    public function checkManagerStatus(Request $request)
+    {
+        $user = Auth::user();
+        $employee = $user->employee;
+        $rosterPeriodId = $request->integer('roster_period_id');
+
+        if (!$employee) {
+            return response()->json([
+                'data' => [
+                    'is_role_manager' => false,
+                    'has_manager_duties' => false,
+                    'is_manager' => false,
+                ],
+            ]);
+        }
+
+        // Check if manager by role
+        $isRoleManager = in_array($user->role, [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER]);
+
+        // Check if has manager duties in requested roster period (if provided)
+        $hasManagerDuties = $this->hasManagerDutyInRosterPeriod($employee->id, $rosterPeriodId);
+
+        return response()->json([
+            'data' => [
+                'is_role_manager' => $isRoleManager,
+                'has_manager_duties' => $hasManagerDuties,
+                'is_manager' => $isRoleManager || $hasManagerDuties,
+                'roster_period_id' => $rosterPeriodId,
+            ],
+        ]);
+    }
+
+    private function hasManagerDutyInRosterPeriod(int $employeeId, ?int $rosterPeriodId): bool
+    {
+        return ManagerDuty::query()
+            ->where('employee_id', $employeeId)
+            ->when($rosterPeriodId, function ($query, $periodId) {
+                $query->whereHas('rosterDay', function ($dayQuery) use ($periodId) {
+                    $dayQuery->where('roster_period_id', $periodId);
+                });
+            })
+            ->exists();
     }
 }
