@@ -23,6 +23,11 @@ class Notification extends Model
         'data',
         'email_sent',
         'email_sent_at',
+        'read_at',
+        'scheduled_at',
+        'status',
+        'error_message',
+        'recipient_ids',
     ];
 
     protected function casts(): array
@@ -32,6 +37,10 @@ class Notification extends Model
             'is_starred' => 'boolean',
             'email_sent' => 'boolean',
             'email_sent_at' => 'datetime',
+            'read_at' => 'datetime',
+            'scheduled_at' => 'datetime',
+            'recipient_ids' => 'json',
+            'data' => 'json',
         ];
     }
 

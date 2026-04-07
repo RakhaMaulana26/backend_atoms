@@ -14,7 +14,9 @@ use App\Models\RosterDay;
 use App\Models\RosterPeriod;
 use App\Models\Shift;
 use App\Models\ShiftAssignment;
+use App\Models\RosterTask;
 use App\Helpers\CacheHelper;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
@@ -44,6 +46,73 @@ class RosterController extends Controller
         $rosters = $query->limit(12)->get();
         
         return response()->json($rosters);
+    }
+
+    /**
+     * Map shift name (or key) to roster_task.shift_key
+     */
+    private function mapShiftToTaskShiftKey(?string $shiftName): ?string
+    {
+        if (empty($shiftName)) {
+            return null;
+        }
+
+        $shiftNameNormalized = strtolower(trim($shiftName));
+
+        return match ($shiftNameNormalized) {
+            '07-13', 'pagi' => '07-13',
+            '13-19', 'siang' => '13-19',
+            '19-07', 'malam' => '19-07',
+            default => null,
+        };
+    }
+
+    /**
+     * Auto-generate roster tasks on publish using manager duties mapping.
+     */
+    private function generateTasksOnPublish(RosterPeriod $rosterPeriod)
+    {
+        $rosterDayIds = $rosterPeriod->rosterDays->pluck('id')->toArray();
+
+        $managerDuties = ManagerDuty::with(['employee.user', 'shift', 'rosterDay'])
+            ->whereIn('roster_day_id', $rosterDayIds)
+            ->get();
+
+        foreach ($managerDuties as $duty) {
+            $managerUser = $duty->employee?->user;
+            $date = $duty->rosterDay?->work_date?->toDateString();
+            $shiftKey = $this->mapShiftToTaskShiftKey($duty->shift?->name ?? null);
+
+            if (!$managerUser || !$date || !$shiftKey) {
+                continue;
+            }
+
+            $title = "Tugas Manager {$duty->duty_type} - {$shiftKey}";
+            $description = "Task otomatis dari publish roster ({$date}) untuk shift {$shiftKey} ({$duty->shift?->name}).";
+
+            $exists = RosterTask::whereDate('date', $date)
+                ->where('shift_key', $shiftKey)
+                ->where('role', $duty->duty_type)
+                ->where('title', $title)
+                ->whereJsonContains('assigned_to', $managerUser->id)
+                ->first();
+
+            if ($exists) {
+                continue;
+            }
+
+            RosterTask::create([
+                'date' => $date,
+                'shift_key' => $shiftKey,
+                'role' => $duty->duty_type,
+                'assigned_to' => [$managerUser->id],
+                'title' => $title,
+                'description' => $description,
+                'priority' => 'medium',
+                'status' => 'pending',
+                'created_by' => Auth::id(),
+            ]);
+        }
     }
 
     /**
@@ -264,6 +333,157 @@ class RosterController extends Controller
     }
 
     /**
+     * GET /roster/today
+     * Frontend category: roster
+     * Response:
+     * {
+     *   date, shift_periods:[{key,name,start,end}], assignments:[{id,user_id,shift_id,shift_key,employee_name,status,assigned_at}]
+     * }
+     */
+    public function today(Request $request)
+    {
+        $dateInput = $request->get('date', Carbon::now()->toDateString());
+
+        try {
+            $date = Carbon::parse($dateInput)->toDateString();
+        } catch (\Exception $e) {
+            return response()->json(['message' => 'Invalid date format'], 422);
+        }
+
+        $shiftPeriods = [
+            ['key' => '07-13', 'name' => 'Shift Pagi', 'start' => '07:00', 'end' => '13:00'],
+            ['key' => '13-19', 'name' => 'Shift Siang', 'start' => '13:00', 'end' => '19:00'],
+            ['key' => '19-07', 'name' => 'Shift Malam', 'start' => '19:00', 'end' => '07:00'],
+        ];
+
+        $shiftMap = [
+            '07-13' => $shiftPeriods[0],
+            '13-19' => $shiftPeriods[1],
+            '19-07' => $shiftPeriods[2],
+            'pagi' => $shiftPeriods[0],
+            'siang' => $shiftPeriods[1],
+            'malam' => $shiftPeriods[2],
+        ];
+
+        $shiftKey = $request->get('shift');
+        if (!$shiftKey) {
+            $now = Carbon::now();
+            $hour = (int) $now->format('H');
+
+            if ($hour >= 7 && $hour < 13) {
+                $shiftKey = '07-13';
+            } elseif ($hour >= 13 && $hour < 19) {
+                $shiftKey = '13-19';
+            } else {
+                $shiftKey = '19-07';
+            }
+        }
+
+        $shiftKey = str_replace(' ', '', strtolower($shiftKey));
+
+        if (isset($shiftMap[$shiftKey])) {
+            $selectedShift = $shiftMap[$shiftKey];
+        } else {
+            return response()->json(['message' => 'Invalid shift key'], 422);
+        }
+
+        // Ensure selectedShift has canonical key
+        $selectedShift['key'] = $selectedShift['key'];
+
+        $rosterDay = RosterDay::whereDate('work_date', $date)
+            ->whereHas('rosterPeriod', function ($q) {
+                $q->where('status', 'published');
+            })
+            ->with(['shiftAssignments.employee.user', 'shiftAssignments.shift'])
+            ->first();
+
+        $assignments = [];
+        $taskCounter = 0;
+
+        if ($rosterDay) {
+            foreach ($rosterDay->shiftAssignments as $assignment) {
+                $assignmentShiftKey = $assignment->shift ? strtolower($assignment->shift->name) : null;
+                $assignmentShiftKey = $assignmentShiftKey === 'pagi' ? '07-13' : ($assignmentShiftKey === 'siang' ? '13-19' : ($assignmentShiftKey === 'malam' ? '19-07' : null));
+
+                if ($assignmentShiftKey !== $selectedShift['key']) {
+                    continue;
+                }
+
+                $employee = $assignment->employee;
+
+                $tasks = [];
+                $taskCounter++;
+                $tasks[] = [
+                    'task_id' => $assignment->id * 100 + 1,
+                    'title' => "Shift task for {$selectedShift['name']}",
+                    'description' => $assignment->notes ? $assignment->notes : "Tugas standar {$selectedShift['name']}",
+                    'status' => 'pending',
+                ];
+
+                $assignments[] = [
+                    'shift_assignment_id' => (int) $assignment->id,
+                    'user_id' => $employee ? (int) $employee->user_id : null,
+                    'user_name' => $employee && $employee->user ? $employee->user->name : 'Unassigned',
+                    'role' => $employee ? ucfirst($employee->employee_type) : 'Unknown',
+                    'shift_key' => $selectedShift['key'],
+                    'tasks' => $tasks,
+                ];
+            }
+        }
+
+        if (empty($assignments)) {
+            // fallback empty assignment row to keep frontend stable
+            $assignments = [];
+        }
+
+        foreach ($assignments as &$assignment) {
+            // any existing tasks can be extended or mutated if required
+        }
+
+        $totalTasks = array_reduce($assignments, function ($carry, $assignment) {
+            return $carry + count($assignment['tasks']);
+        }, 0);
+
+        $summary = [
+            'total_assignments' => count($assignments),
+            'total_tasks' => $totalTasks,
+            'high_priority' => 0,
+        ];
+
+        return response()->json([
+            'date' => $date,
+            'shift_key' => $selectedShift['key'],
+            'shift_start' => $selectedShift['start'],
+            'shift_end' => $selectedShift['end'],
+            'shift_name' => $selectedShift['name'],
+            'shift_periods' => $shiftPeriods,
+            'assignments' => $assignments,
+            'summary' => $summary,
+        ]);
+    }
+
+    /**
+     * GET /roster/tasks
+     * Optional: Get tasks grouped by assignment for selected date+shift
+     */
+    public function tasks(Request $request)
+    {
+        $date = $request->get('date', Carbon::now()->toDateString());
+        $shift = $request->get('shift', '13-19');
+
+        $todayData = $this->today($request);
+
+        // convert response content from JSON string to array
+        $payload = json_decode($todayData->getContent(), true);
+
+        $filtered = array_filter($payload['assignments'] ?? [], function ($assignment) use ($shift) {
+            return ($assignment['shift_key'] ?? '') === (strtolower($shift) === 'pagi' ? '07-13' : (strtolower($shift) === 'siang' ? '13-19' : (strtolower($shift) === 'malam' ? '19-07' : $shift)));
+        });
+
+        return response()->json(array_values($filtered));
+    }
+
+    /**
      * POST /rosters/{id}/publish
      * Query params:
      * - skip_validation=1 : Skip completeness validation (force publish)
@@ -296,6 +516,8 @@ class RosterController extends Controller
 
         $rosterPeriod->status = 'published';
         $rosterPeriod->save();
+
+        $this->generateTasksOnPublish($rosterPeriod);
 
         ActivityLog::create([
             'user_id' => Auth::id(),
@@ -1288,5 +1510,80 @@ class RosterController extends Controller
                 'error' => $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * GET /api/roster/auto-assignment?date=YYYY-MM-DD&shift=07-13|13-19|19-07
+     * Return array of user objects {id, name, role} available for assignment
+     */
+    public function autoAssignment(Request $request)
+    {
+        $request->validate([
+            'date' => 'required|date',
+            'shift' => 'required|string',
+        ]);
+
+        $date = $request->date;
+        $shiftKey = $request->shift;
+
+        // Map shift key to shift name
+        $shiftNameMap = [
+            '07-13' => 'pagi',
+            '13-19' => 'siang',
+            '19-07' => 'malam',
+        ];
+
+        $shiftName = $shiftNameMap[$shiftKey] ?? null;
+        if (!$shiftName) {
+            return response()->json(['message' => 'Invalid shift key'], 400);
+        }
+
+        // Find shift by name
+        $shift = Shift::where('name', $shiftName)->first();
+        if (!$shift) {
+            return response()->json(['message' => 'Shift not found'], 404);
+        }
+
+        // Find roster day for the date
+        $rosterDay = RosterDay::whereDate('work_date', $date)->first();
+        if (!$rosterDay) {
+            // If no roster day, return all active employees
+            $employees = Employee::with('user:id,name,role')
+                ->where('is_active', true)
+                ->whereNotNull('group_number')
+                ->where('group_number', '>', 0)
+                ->get()
+                ->map(function ($employee) {
+                    return [
+                        'id' => $employee->user->id,
+                        'name' => $employee->user->name,
+                        'role' => $employee->user->role,
+                    ];
+                });
+            return response()->json(['data' => $employees]);
+        }
+
+        // Get assigned employee IDs for this shift on this day
+        $assignedEmployeeIds = ShiftAssignment::where('roster_day_id', $rosterDay->id)
+            ->where('shift_id', $shift->id)
+            ->pluck('employee_id')
+            ->toArray();
+
+        // Get available employees (not assigned to this shift)
+        $availableEmployees = Employee::with('user:id,name,role')
+            ->where('is_active', true)
+            ->whereNotNull('group_number')
+            ->where('group_number', '>', 0)
+            ->whereNotIn('id', $assignedEmployeeIds)
+            ->get()
+            ->map(function ($employee) {
+                return [
+                    'id' => $employee->user->id,
+                    'name' => $employee->user->name,
+                    'role' => $employee->user->role,
+                ];
+            });
+
+        return response()->json(['data' => $availableEmployees]);
     }
 }
