@@ -53,6 +53,8 @@ class RosterController extends Controller
     {
         DB::beginTransaction();
         try {
+            $this->ensureDefaultManagerGroupAssignments();
+
             // Check if roster period already exists
             $existingPeriod = RosterPeriod::where('month', $request->month)
                 ->where('year', $request->year)
@@ -1294,8 +1296,8 @@ class RosterController extends Controller
     {
         $validated = $request->validate([
             'employee_id' => 'required|integer|exists:employees,id',
-            'group_number' => 'required|integer|min:1|max:20',
-            'employee_type' => 'required|string|in:CNS,Support',
+            'group_number' => 'required|integer|min:1|max:5',
+            'employee_type' => 'required|string|in:CNS,Support,Manager Teknik',
         ]);
 
         DB::beginTransaction();
@@ -1317,22 +1319,70 @@ class RosterController extends Controller
                 ], 422);
             }
 
-            if (!in_array($employee->employee_type, ['CNS', 'Support'])) {
+            if (!in_array($employee->employee_type, ['CNS', 'Support', 'Manager Teknik'])) {
                 return response()->json([
-                    'message' => 'Only CNS or Support employees can be managed in group formation',
+                    'message' => 'Only CNS, Support, or Manager Teknik employees can be managed in group formation',
                 ], 422);
             }
 
             $oldGroup = $employee->group_number;
+            $swappedManager = null;
+
+            if ($employee->employee_type === 'Manager Teknik') {
+                $grade = (int) ($employee->user->grade ?? 0);
+                if (!in_array($grade, [13, 14, 15], true)) {
+                    return response()->json([
+                        'message' => 'Only Manager Teknik grade 13-15 can be assigned to manager groups',
+                    ], 422);
+                }
+
+                $targetGroupNumber = (int) $validated['group_number'];
+                $occupiedByOtherManager = Employee::query()
+                    ->where('employee_type', 'Manager Teknik')
+                    ->where('group_number', $targetGroupNumber)
+                    ->where('id', '!=', $employee->id)
+                    ->with('user:id,name,email,grade')
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($occupiedByOtherManager) {
+                    if ((int) ($oldGroup ?? 0) <= 0) {
+                        return response()->json([
+                            'message' => 'Current manager group is invalid, cannot perform automatic swap.',
+                        ], 422);
+                    }
+
+                    // Swap groups so no duplicate manager exists in the same group.
+                    $occupiedByOtherManager->group_number = (int) $oldGroup;
+                    $occupiedByOtherManager->save();
+                    $swappedManager = $occupiedByOtherManager;
+                }
+            }
+
             $employee->group_number = $validated['group_number'];
             $employee->save();
+
+            $syncedDays = 0;
+            $swappedSyncedDays = 0;
+            if ($employee->employee_type === 'Manager Teknik') {
+                $syncedDays = $this->syncManagerAssignmentsToGroup($rosterPeriod->id, $employee, (int) $validated['group_number']);
+                if ($swappedManager) {
+                    $swappedSyncedDays = $this->syncManagerAssignmentsToGroup($rosterPeriod->id, $swappedManager, (int) $swappedManager->group_number);
+                }
+            } else {
+                $syncedDays = $this->syncEmployeeAssignmentsToGroup(
+                    $rosterPeriod->id,
+                    $employee,
+                    (int) $validated['group_number']
+                );
+            }
 
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => 'update',
                 'module' => 'roster',
                 'reference_id' => $rosterId,
-                'description' => 'Assigned ' . $employee->user->name . ' (ID: ' . $employee->id . ') to ' . $employee->employee_type . ' group ' . $validated['group_number'] . ' (from group ' . ($oldGroup ?? 0) . ')',
+                'description' => 'Assigned ' . $employee->user->name . ' (ID: ' . $employee->id . ') to ' . $employee->employee_type . ' group ' . $validated['group_number'] . ' (from group ' . ($oldGroup ?? 0) . ')' . ($swappedManager ? '; swapped with ' . $swappedManager->user->name . ' to group ' . $swappedManager->group_number : '') . (($syncedDays + $swappedSyncedDays) > 0 ? ' and synced ' . ($syncedDays + $swappedSyncedDays) . ' day(s)' : ''),
             ]);
 
             DB::commit();
@@ -1340,13 +1390,22 @@ class RosterController extends Controller
             CacheHelper::clearRosterCache();
 
             return response()->json([
-                'message' => 'Employee assigned to group successfully',
+                'message' => $swappedManager
+                    ? 'Employee assigned to group successfully with automatic manager swap'
+                    : 'Employee assigned to group successfully',
                 'data' => [
                     'employee_id' => $employee->id,
                     'employee_name' => $employee->user->name,
                     'employee_type' => $employee->employee_type,
                     'old_group' => $oldGroup,
                     'new_group' => $employee->group_number,
+                    'synced_days' => $syncedDays,
+                    'swapped_manager' => $swappedManager ? [
+                        'employee_id' => $swappedManager->id,
+                        'employee_name' => $swappedManager->user->name,
+                        'new_group' => $swappedManager->group_number,
+                        'synced_days' => $swappedSyncedDays,
+                    ] : null,
                 ],
             ]);
 
@@ -1592,5 +1651,173 @@ class RosterController extends Controller
                 'error' => $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Keep Manager Teknik default mapping unique: MT1->1, MT2->2, MT3->3, MT4->4, MT5->5.
+     * This guarantees deterministic ordering and grouping on first roster creation.
+     */
+    private function ensureDefaultManagerGroupAssignments(): void
+    {
+        $managerDefaultGroups = [
+            'Dudik Fahrudin Sukarno' => 1,
+            'Andi Wibowo' => 2,
+            'Efried Nara Perkasa' => 3,
+            'Alam Fahmi' => 4,
+            'Netty Septa Cristila' => 5,
+        ];
+
+        $managers = Employee::query()
+            ->where('employee_type', 'Manager Teknik')
+            ->with('user:id,name')
+            ->get();
+
+        foreach ($managers as $manager) {
+            $managerName = $manager->user?->name;
+            if (!$managerName || !array_key_exists($managerName, $managerDefaultGroups)) {
+                continue;
+            }
+
+            $expectedGroup = $managerDefaultGroups[$managerName];
+            if ((int) $manager->group_number !== $expectedGroup) {
+                $manager->group_number = $expectedGroup;
+                $manager->save();
+            }
+        }
+    }
+
+    /**
+     * Copy shift assignments from the existing manager in the target group to the selected manager.
+     */
+    private function syncManagerAssignmentsToGroup(int $rosterId, Employee $manager, int $targetGroupNumber): int
+    {
+        $anchorManager = Employee::query()
+            ->where('employee_type', 'Manager Teknik')
+            ->where('group_number', $targetGroupNumber)
+            ->where('id', '!=', $manager->id)
+            ->with('user:id,name,email,grade')
+            ->first();
+
+        if (!$anchorManager) {
+            return 0;
+        }
+
+        $rosterDayIds = RosterDay::where('roster_period_id', $rosterId)
+            ->pluck('id')
+            ->toArray();
+
+        $anchorAssignments = ShiftAssignment::whereIn('roster_day_id', $rosterDayIds)
+            ->where('employee_id', $anchorManager->id)
+            ->get()
+            ->keyBy('roster_day_id');
+
+        if ($anchorAssignments->isEmpty()) {
+            return 0;
+        }
+
+        $updatedDays = 0;
+        foreach ($rosterDayIds as $rosterDayId) {
+            $anchorAssignment = $anchorAssignments->get($rosterDayId);
+            if (!$anchorAssignment) {
+                continue;
+            }
+
+            $managerAssignment = ShiftAssignment::where('roster_day_id', $rosterDayId)
+                ->where('employee_id', $manager->id)
+                ->first();
+
+            if ($managerAssignment) {
+                $managerAssignment->update([
+                    'shift_id' => $anchorAssignment->shift_id,
+                    'notes' => $anchorAssignment->notes,
+                    'span_days' => $anchorAssignment->span_days,
+                ]);
+            } else {
+                ShiftAssignment::create([
+                    'roster_day_id' => $rosterDayId,
+                    'employee_id' => $manager->id,
+                    'shift_id' => $anchorAssignment->shift_id,
+                    'notes' => $anchorAssignment->notes,
+                    'span_days' => $anchorAssignment->span_days,
+                ]);
+            }
+
+            $updatedDays++;
+        }
+
+        return $updatedDays;
+    }
+
+    /**
+     * Copy shift assignments from an anchor in target group to the selected CNS/Support employee.
+     * Priority anchor: same employee_type in same group, fallback to Manager Teknik of that group.
+     */
+    private function syncEmployeeAssignmentsToGroup(int $rosterId, Employee $employee, int $targetGroupNumber): int
+    {
+        $rosterDayIds = RosterDay::where('roster_period_id', $rosterId)
+            ->pluck('id')
+            ->toArray();
+
+        if (empty($rosterDayIds)) {
+            return 0;
+        }
+
+        $anchorEmployee = Employee::query()
+            ->where('employee_type', $employee->employee_type)
+            ->where('group_number', $targetGroupNumber)
+            ->where('id', '!=', $employee->id)
+            ->first();
+
+        if (!$anchorEmployee) {
+            $anchorEmployee = Employee::query()
+                ->where('employee_type', 'Manager Teknik')
+                ->where('group_number', $targetGroupNumber)
+                ->first();
+        }
+
+        if (!$anchorEmployee) {
+            return 0;
+        }
+
+        $anchorAssignments = ShiftAssignment::whereIn('roster_day_id', $rosterDayIds)
+            ->where('employee_id', $anchorEmployee->id)
+            ->get()
+            ->keyBy('roster_day_id');
+
+        if ($anchorAssignments->isEmpty()) {
+            return 0;
+        }
+
+        $updatedDays = 0;
+        foreach ($rosterDayIds as $rosterDayId) {
+            $anchorAssignment = $anchorAssignments->get($rosterDayId);
+            if (!$anchorAssignment) {
+                continue;
+            }
+
+            $employeeAssignment = ShiftAssignment::where('roster_day_id', $rosterDayId)
+                ->where('employee_id', $employee->id)
+                ->first();
+
+            if ($employeeAssignment) {
+                $employeeAssignment->update([
+                    'shift_id' => $anchorAssignment->shift_id,
+                    'notes' => $anchorAssignment->notes,
+                    'span_days' => $anchorAssignment->span_days,
+                ]);
+            } else {
+                ShiftAssignment::create([
+                    'roster_day_id' => $rosterDayId,
+                    'employee_id' => $employee->id,
+                    'shift_id' => $anchorAssignment->shift_id,
+                    'notes' => $anchorAssignment->notes,
+                    'span_days' => $anchorAssignment->span_days,
+                ]);
+            }
+
+            $updatedDays++;
+        }
+
+        return $updatedDays;
     }
 }

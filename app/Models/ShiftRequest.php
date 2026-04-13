@@ -30,6 +30,8 @@ class ShiftRequest extends Model
         'reason',
         'status',
         'approved_by_target',
+        'from_manager_id',
+        'to_manager_id',
         'approved_by_from_manager',
         'approved_by_to_manager',
         'cancelled_at',
@@ -71,6 +73,16 @@ class ShiftRequest extends Model
     public function toRosterDay()
     {
         return $this->belongsTo(RosterDay::class, 'to_roster_day_id');
+    }
+
+    public function fromManagerEmployee()
+    {
+        return $this->belongsTo(Employee::class, 'from_manager_id');
+    }
+
+    public function toManagerEmployee()
+    {
+        return $this->belongsTo(Employee::class, 'to_manager_id');
     }
 
     /**

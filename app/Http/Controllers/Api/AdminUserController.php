@@ -31,6 +31,9 @@ class AdminUserController extends Controller
      */
     public function index(Request $request)
     {
+        $currentUser = $request->user();
+        $isAdmin = $currentUser && $currentUser->role === User::ROLE_ADMIN;
+
         // Build cache key with all filter parameters to ensure proper cache isolation
         $cacheParams = [
             'page' => $request->get('page', 1),
@@ -39,14 +42,20 @@ class AdminUserController extends Controller
             'employee_type' => $request->get('employee_type', ''),
             'is_active' => $request->get('is_active', ''),
             'search' => $request->get('search', ''),
+            'is_admin' => $isAdmin ? '1' : '0',
         ];
         $cacheKey = 'users_list_' . md5(json_encode($cacheParams));
         
         // Cache for 5 minutes
-        $users = Cache::remember($cacheKey, 300, function () use ($request) {
-            $query = User::with(['employee' => function($q) {
-                $q->withTrashed();
-            }])->withTrashed();
+        $users = Cache::remember($cacheKey, 300, function () use ($request, $isAdmin) {
+            if ($isAdmin) {
+                $query = User::with(['employee' => function($q) {
+                    $q->withTrashed();
+                }])->withTrashed();
+            } else {
+                // Non-admin users can only view existing active users (no trashed records)
+                $query = User::with('employee')->whereNull('deleted_at')->where('is_active', true);
+            }
 
             // Filter by role
             if ($request->filled('role')) {
@@ -61,7 +70,7 @@ class AdminUserController extends Controller
             }
 
             // Filter by active status
-            if ($request->filled('is_active')) {
+            if ($isAdmin && $request->filled('is_active')) {
                 $query->where('is_active', $request->is_active);
             }
 

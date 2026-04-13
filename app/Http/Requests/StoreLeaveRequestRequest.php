@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\LeaveRequest;
+use Carbon\Carbon;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -147,5 +148,47 @@ class StoreLeaveRequestRequest extends FormRequest
             'program_course' => 'program/kursus',
             'document' => 'dokumen',
         ];
+    }
+
+    public function withValidator($validator): void
+    {
+        $validator->after(function ($validator) {
+            $startDate = $this->input('start_date');
+            $requestType = $this->input('request_type');
+
+            if (!$startDate || !$requestType) {
+                return;
+            }
+
+            try {
+                $rosterStartOfMonth = Carbon::parse($startDate)->startOfMonth();
+                $today = Carbon::today();
+            } catch (\Throwable $e) {
+                return;
+            }
+
+            if ($today->greaterThanOrEqualTo($rosterStartOfMonth) && $requestType !== LeaveRequest::TYPE_DOCTOR_LEAVE) {
+                $validator->errors()->add(
+                    'request_type',
+                    'Setelah memasuki bulan roster, pengajuan yang diperbolehkan hanya Cuti Sakit.'
+                );
+            }
+
+            if (
+                $today->greaterThanOrEqualTo($rosterStartOfMonth)
+                && $requestType === LeaveRequest::TYPE_DOCTOR_LEAVE
+            ) {
+                $start = Carbon::parse($startDate)->toDateString();
+                $end = $this->input('end_date') ? Carbon::parse($this->input('end_date'))->toDateString() : null;
+                $todayDate = $today->toDateString();
+
+                if ($start < $todayDate || ($end !== null && $end < $todayDate)) {
+                    $validator->errors()->add(
+                        'start_date',
+                        'Untuk Cuti Sakit pada bulan roster yang sudah berjalan, tanggal tidak boleh sebelum hari ini.'
+                    );
+                }
+            }
+        });
     }
 }

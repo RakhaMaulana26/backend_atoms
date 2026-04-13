@@ -43,8 +43,10 @@ class StoreShiftRequestRequest extends FormRequest
         $targetEmployeeId = $this->input('target_employee_id');
         $fromRosterDayId = $this->input('from_roster_day_id');
         $toRosterDayId = $this->input('to_roster_day_id');
-        $requesterNotes = $this->input('requester_notes');
-        $targetNotes = $this->input('target_notes');
+        $requesterNotes = trim((string) $this->input('requester_notes'));
+        $targetNotes = trim((string) $this->input('target_notes'));
+        $requesterNotesLower = strtolower($requesterNotes);
+        $targetNotesLower = strtolower($targetNotes);
 
         // 1. Cannot swap with self
         if ($requesterEmployee->id == $targetEmployeeId) {
@@ -77,7 +79,13 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
-        // 4. Validate roster days
+        // 4. Single-day swap only: source and destination must be the same day.
+        if ((int) $fromRosterDayId !== (int) $toRosterDayId) {
+            $validator->errors()->add('to_roster_day_id', 'Pertukaran shift hanya dapat dilakukan pada hari yang sama.');
+            return;
+        }
+
+        // 5. Validate roster days
         $fromRosterDay = RosterDay::with('rosterPeriod')->find($fromRosterDayId);
         $toRosterDay = RosterDay::with('rosterPeriod')->find($toRosterDayId);
 
@@ -86,7 +94,7 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
-        // 5. Both rosters must be published
+        // 6. Both rosters must be published
         if ($fromRosterDay->rosterPeriod->status !== 'published') {
             $validator->errors()->add('from_roster_day_id', 'Roster period belum dipublish.');
             return;
@@ -97,7 +105,7 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
-        // 6. Check H-3 rule (minimum 3 days before)
+        // 7. Check H-3 rule (minimum 3 days before)
         $minDate = Carbon::now()->addDays(3)->startOfDay();
         
         if (Carbon::parse($fromRosterDay->work_date)->lt($minDate)) {
@@ -105,15 +113,12 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
-        if (Carbon::parse($toRosterDay->work_date)->lt($minDate)) {
-            $validator->errors()->add('to_roster_day_id', 'Tanggal target shift harus minimal H-3 dari sekarang.');
-            return;
-        }
+        // to_roster_day_id is the same as from_roster_day_id in this flow.
 
-        // 7. Requester must have a shift assignment on from_roster_day with the specified notes
+        // 8. Requester must have a WORKING shift on selected day with requester_notes
         $requesterAssignment = ShiftAssignment::where('roster_day_id', $fromRosterDayId)
             ->where('employee_id', $requesterEmployee->id)
-            ->where('notes', $requesterNotes)
+            ->whereRaw('LOWER(TRIM(notes)) = ?', [$requesterNotesLower])
             ->first();
 
         if (!$requesterAssignment) {
@@ -121,28 +126,44 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
-        // 8. Target must have a shift assignment on to_roster_day with the specified notes
-        $targetAssignment = ShiftAssignment::where('roster_day_id', $toRosterDayId)
-            ->where('employee_id', $targetEmployeeId)
-            ->where('notes', $targetNotes)
-            ->first();
-
-        if (!$targetAssignment) {
-            $validator->errors()->add('target_notes', 'Target employee tidak memiliki shift tersebut pada tanggal yang dipilih.');
+        if ($this->isOffDayNotes($requesterNotesLower)) {
+            $validator->errors()->add('requester_notes', 'Shift asal harus shift kerja, bukan libur/cuti/off.');
             return;
         }
 
-        // 9. Check for duplicate pending requests
+        // 9. Requested shift must be different from current shift on the same date.
+        if ($requesterNotesLower === $targetNotesLower) {
+            $validator->errors()->add('target_notes', 'Shift request harus berbeda dari shift Anda di hari tersebut.');
+            return;
+        }
+
+        // 10. Target partner must have requested WORKING shift on the same date.
+        $targetAssignment = ShiftAssignment::where('roster_day_id', $fromRosterDayId)
+            ->where('employee_id', $targetEmployeeId)
+            ->whereRaw('LOWER(TRIM(notes)) = ?', [$targetNotesLower])
+            ->first();
+
+        if (!$targetAssignment) {
+            $validator->errors()->add('target_notes', 'Rekan persetujuan tidak memiliki shift tersebut pada tanggal yang dipilih.');
+            return;
+        }
+
+        if ($this->isOffDayNotes($targetNotesLower)) {
+            $validator->errors()->add('target_notes', 'Rekan persetujuan harus memiliki shift kerja (bukan libur/cuti/off) pada tanggal yang dipilih.');
+            return;
+        }
+
+        // 11. Check for duplicate pending requests
         $existingRequest = ShiftRequest::where('status', 'pending')
-            ->where(function ($query) use ($requesterEmployee, $targetEmployeeId, $fromRosterDayId, $toRosterDayId, $requesterNotes, $targetNotes) {
+            ->where(function ($query) use ($requesterEmployee, $targetEmployeeId, $fromRosterDayId, $toRosterDayId, $requesterNotesLower, $targetNotesLower) {
                 // Same exact request
-                $query->where(function ($q) use ($requesterEmployee, $targetEmployeeId, $fromRosterDayId, $toRosterDayId, $requesterNotes, $targetNotes) {
+                $query->where(function ($q) use ($requesterEmployee, $targetEmployeeId, $fromRosterDayId, $toRosterDayId, $requesterNotesLower, $targetNotesLower) {
                     $q->where('requester_employee_id', $requesterEmployee->id)
                         ->where('target_employee_id', $targetEmployeeId)
                         ->where('from_roster_day_id', $fromRosterDayId)
                         ->where('to_roster_day_id', $toRosterDayId)
-                        ->where('requester_notes', $requesterNotes)
-                        ->where('target_notes', $targetNotes);
+                        ->whereRaw('LOWER(TRIM(requester_notes)) = ?', [$requesterNotesLower])
+                        ->whereRaw('LOWER(TRIM(target_notes)) = ?', [$targetNotesLower]);
                 });
             })
             ->exists();
@@ -152,11 +173,11 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
-        // 10. Check if requester has another pending request for the same from_roster_day and shift
+        // 12. Requester cannot have another pending request that uses the same source shift.
         $conflictingRequesterRequest = ShiftRequest::where('status', 'pending')
             ->where('requester_employee_id', $requesterEmployee->id)
             ->where('from_roster_day_id', $fromRosterDayId)
-            ->where('requester_notes', $requesterNotes)
+            ->whereRaw('LOWER(TRIM(requester_notes)) = ?', [$requesterNotesLower])
             ->exists();
 
         if ($conflictingRequesterRequest) {
@@ -164,72 +185,16 @@ class StoreShiftRequestRequest extends FormRequest
             return;
         }
 
-        // 11. Check if target has another pending request where their shift is being requested
+        // 13. Target partner cannot be double-booked for the same requested shift in pending requests.
         $conflictingTargetRequest = ShiftRequest::where('status', 'pending')
             ->where('target_employee_id', $targetEmployeeId)
-            ->where('to_roster_day_id', $toRosterDayId)
-            ->where('target_notes', $targetNotes)
+            ->where('to_roster_day_id', $fromRosterDayId)
+            ->whereRaw('LOWER(TRIM(target_notes)) = ?', [$targetNotesLower])
             ->exists();
 
         if ($conflictingTargetRequest) {
-            $validator->errors()->add('target_employee_id', 'Target employee sudah memiliki permintaan tukar shift yang pending untuk shift tersebut.');
+            $validator->errors()->add('target_employee_id', 'Rekan persetujuan sudah memiliki permintaan pending untuk shift tujuan yang sama.');
             return;
-        }
-
-        // 12. Requester cannot select a target day where they already have a WORKING shift
-        // Off days (L, Libur, Cuti, etc.) are allowed - user can pick up shifts on their off days
-        // This prevents double shifts on the same day
-        // EXCEPTION: Same-day swap is allowed (when from_roster_day_id == to_roster_day_id)
-        $offDayNotes = ['l', 'l1', 'l2', 'ct', 'cs', 'dl', 'tb', 'off', 'libur', 'cuti'];
-        
-        // Only check for double shift if it's NOT a same-day swap
-        if ($fromRosterDayId != $toRosterDayId) {
-            $requesterHasWorkingShiftOnTargetDay = ShiftAssignment::where('roster_day_id', $toRosterDayId)
-                ->where('employee_id', $requesterEmployee->id)
-                ->where(function ($q) use ($offDayNotes) {
-                    // Only check for WORKING shifts, not off days
-                    $q->whereRaw('LOWER(TRIM(notes)) NOT IN (' . implode(',', array_map(fn($s) => "'$s'", $offDayNotes)) . ')')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'libur%\'')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'cuti%\'')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'off%\'');
-                })
-                ->exists();
-
-            if ($requesterHasWorkingShiftOnTargetDay) {
-                $toDate = Carbon::parse($toRosterDay->work_date)->format('d M Y');
-                $validator->errors()->add('to_roster_day_id', "Anda sudah memiliki jadwal shift kerja pada tanggal $toDate. Pilih tanggal dimana Anda libur untuk menghindari shift ganda.");
-                return;
-            }
-        }
-
-        // 13. Similarly, target cannot already have a WORKING shift on requester's from_roster_day
-        // This prevents target from getting double shifts after swap
-        // EXCEPTION: Same-day swap is allowed
-        if ($fromRosterDayId != $toRosterDayId) {
-            $targetHasWorkingShiftOnFromDay = ShiftAssignment::where('roster_day_id', $fromRosterDayId)
-                ->where('employee_id', $targetEmployeeId)
-                ->where(function ($q) use ($offDayNotes) {
-                    // Only check for WORKING shifts, not off days
-                    $q->whereRaw('LOWER(TRIM(notes)) NOT IN (' . implode(',', array_map(fn($s) => "'$s'", $offDayNotes)) . ')')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'libur%\'')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'cuti%\'')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'off%\'');
-                })
-                ->exists();
-
-            if ($targetHasWorkingShiftOnFromDay) {
-                $fromDate = Carbon::parse($fromRosterDay->work_date)->format('d M Y');
-                $validator->errors()->add('from_roster_day_id', "Target employee sudah memiliki jadwal shift kerja pada tanggal $fromDate. Tukar shift tidak memungkinkan karena akan menyebabkan shift ganda.");
-                return;
-            }
-        }
-
-        // 14. For same-day swap, requester and target must have DIFFERENT shifts
-        if ($fromRosterDayId == $toRosterDayId) {
-            if (strtolower(trim($requesterNotes)) === strtolower(trim($targetNotes))) {
-                $validator->errors()->add('target_notes', 'Untuk tukar shift di hari yang sama, Anda harus memilih shift yang berbeda.');
-                return;
-            }
         }
     }
 
@@ -276,5 +241,18 @@ class StoreShiftRequestRequest extends FormRequest
         ];
 
         return in_array($targetGrade, $crossGradePairs[$requesterGrade] ?? [], true);
+    }
+
+    private function isOffDayNotes(string $notesLower): bool
+    {
+        $offDayNotes = ['l', 'l1', 'l2', 'ct', 'cs', 'dl', 'tb', 'off', 'libur', 'cuti'];
+
+        if (in_array($notesLower, $offDayNotes, true)) {
+            return true;
+        }
+
+        return str_starts_with($notesLower, 'libur')
+            || str_starts_with($notesLower, 'cuti')
+            || str_starts_with($notesLower, 'off');
     }
 }

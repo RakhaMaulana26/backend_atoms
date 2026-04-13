@@ -16,6 +16,7 @@ use App\Models\RosterPeriod;
 use App\Models\User;
 use App\Services\ShiftResolverService;
 use Carbon\Carbon;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
@@ -45,81 +46,64 @@ class ShiftRequestController extends Controller
             $query->where('status', $request->status);
         }
 
+        // Optional filter by roster period for calendar/scope-specific views
+        if ($rosterPeriodId) {
+            $query->whereHas('fromRosterDay', function ($q) use ($rosterPeriodId) {
+                $q->where('roster_period_id', $rosterPeriodId);
+            });
+        }
+
         // Manager approver can be role-based manager OR temporary manager on duty (manager_duties)
         $isManagerEmployee = $employee && (
             in_array($user->role, [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])
             || $this->hasManagerDutyInRosterPeriod($employee->id, $rosterPeriodId)
         );
-        $isAdminRole = in_array($user->role, [User::ROLE_ADMIN, User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER]);
+        $isAdminRole = $user->role === User::ROLE_ADMIN;
 
-        // Filter based on role and type parameter
-        if ($isAdminRole && $request->get('type') === 'all') {
-            // Admin can see all - no filter applied
-        } elseif ($isManagerEmployee) {
-            // Manager employee - can see:
-            // 1. Requests where they are requester or target
-            // 2. Requests where they work the SAME shift as requester on from_roster_day
-            // 3. Requests where they work the SAME shift as target on to_roster_day
-            $query->where(function ($q) use ($employee, $user) {
-                // Requester or target
-                $q->where('requester_employee_id', $employee->id)
-                    ->orWhere('target_employee_id', $employee->id)
-                    // Manager works same shift as requester on from_roster_day
-                    ->orWhereExists(function ($subQ) use ($employee) {
-                        $subQ->select(DB::raw(1))
-                            ->from('shift_assignments')
-                            ->whereColumn('shift_assignments.roster_day_id', 'shift_requests.from_roster_day_id')
-                            ->whereRaw('LOWER(TRIM(shift_assignments.notes)) = LOWER(TRIM(shift_requests.requester_notes))')
-                            ->where('shift_assignments.employee_id', $employee->id);
-                    })
-                    // Manager works same shift as target on to_roster_day
-                    ->orWhereExists(function ($subQ) use ($employee) {
-                        $subQ->select(DB::raw(1))
-                            ->from('shift_assignments')
-                            ->whereColumn('shift_assignments.roster_day_id', 'shift_requests.to_roster_day_id')
-                            ->whereRaw('LOWER(TRIM(shift_assignments.notes)) = LOWER(TRIM(shift_requests.target_notes))')
-                            ->where('shift_assignments.employee_id', $employee->id);
-                    })
-                    // Temporary manager on duty for requester day
-                    ->orWhereExists(function ($subQ) use ($employee) {
-                        $subQ->select(DB::raw(1))
-                            ->from('manager_duties')
-                            ->whereColumn('manager_duties.roster_day_id', 'shift_requests.from_roster_day_id')
-                            ->where('manager_duties.employee_id', $employee->id);
-                    })
-                    // Temporary manager on duty for target day
-                    ->orWhereExists(function ($subQ) use ($employee) {
-                        $subQ->select(DB::raw(1))
-                            ->from('manager_duties')
-                            ->whereColumn('manager_duties.roster_day_id', 'shift_requests.to_roster_day_id')
-                            ->where('manager_duties.employee_id', $employee->id);
-                    });
+        // Build unified visibility set first so only involved parties can see requests.
+        $allRequests = $query
+            ->orderBy('created_at', 'desc')
+            ->get();
 
-                // General Manager can see manager-to-manager requests directly.
-                if ($user->role === User::ROLE_GENERAL_MANAGER) {
-                    $q->orWhere(function ($subQ) {
-                        $subQ->whereHas('requesterEmployee.user', function ($uq) {
-                            $uq->where('role', User::ROLE_MANAGER_TEKNIK);
-                        })->whereHas('targetEmployee.user', function ($uq) {
-                            $uq->where('role', User::ROLE_MANAGER_TEKNIK);
-                        });
-                    });
-                }
-            });
-        } elseif ($employee) {
-            // Regular employee - only show requests where they are requester or target
-            $query->forEmployee($employee->id);
-        }
+        $visibleRequests = $allRequests->filter(function (ShiftRequest $shiftRequest) use ($employee, $user, $isAdminRole, $isManagerEmployee) {
+            if ($isAdminRole) {
+                return true;
+            }
 
-        // Sort
-        $query->orderBy('created_at', 'desc');
+            if (!$employee) {
+                return false;
+            }
 
-        // Pagination
-        $perPage = $request->get('per_page', 15);
-        $requests = $query->paginate($perPage);
+            if ((int) $shiftRequest->requester_employee_id === (int) $employee->id
+                || (int) $shiftRequest->target_employee_id === (int) $employee->id) {
+                return true;
+            }
 
-        // Add current_user_can_approve info for each request
-        $requestsWithApprovalInfo = collect($requests->items())->map(function ($request) use ($employee, $isManagerEmployee, $user) {
+            if (!$isManagerEmployee) {
+                return false;
+            }
+
+            $managerApproval = $this->getManagerApprovalContext($shiftRequest, $user, $employee);
+            return $managerApproval['is_related_manager'];
+        })->values();
+
+        $perPage = (int) $request->get('per_page', 15);
+        $currentPage = max((int) $request->get('page', 1), 1);
+        $currentPageItems = $visibleRequests->forPage($currentPage, $perPage)->values();
+
+        $requests = new LengthAwarePaginator(
+            $currentPageItems,
+            $visibleRequests->count(),
+            $perPage,
+            $currentPage,
+            [
+                'path' => request()->url(),
+                'query' => request()->query(),
+            ]
+        );
+
+        // Add current_user_can_approve info for each request using the same approver resolution.
+        $requestsWithApprovalInfo = collect($requests->items())->map(function ($request) use ($employee, $user) {
             $requestArray = $request->toArray();
             
             // Default values
@@ -142,52 +126,12 @@ class ShiftRequestController extends Controller
                 $requestArray['current_user_already_approved'] = true;
             }
             
-            $isManagerToManagerSwap = $requestArray['is_manager_to_manager'];
+            // Check if can approve as manager using unified approver logic
+            if ($request->status === ShiftRequest::STATUS_PENDING) {
+                $managerApproval = $this->getManagerApprovalContext($request, $user, $employee);
+                $requestArray['current_user_can_approve_as_manager'] = $managerApproval['can_approve'];
 
-            // Check if can approve as manager
-            if ($isManagerEmployee && $request->status === ShiftRequest::STATUS_PENDING) {
-                // Special case: manager-to-manager swap requires General Manager approval.
-                if ($isManagerToManagerSwap) {
-                    if ($user->role === User::ROLE_GENERAL_MANAGER) {
-                        $requestArray['current_user_can_approve_as_manager'] =
-                            !$request->approved_by_from_manager || !$request->approved_by_to_manager;
-
-                        if ($request->approved_by_from_manager && $request->approved_by_to_manager) {
-                            $requestArray['current_user_already_approved'] = true;
-                        }
-                    }
-
-                    return $requestArray;
-                }
-
-                $fromManagerDuty = $this->resolveManagerDutyForContext(
-                    (int) $request->from_roster_day_id,
-                    (string) $request->requester_notes,
-                    $request->requesterEmployee?->group_number
-                );
-
-                $toManagerDuty = $this->resolveManagerDutyForContext(
-                    (int) $request->to_roster_day_id,
-                    (string) $request->target_notes,
-                    $request->targetEmployee?->group_number
-                );
-
-                $isFromManager = $fromManagerDuty && (int) $fromManagerDuty->employee_id === (int) $employee->id;
-                $isToManager = $toManagerDuty && (int) $toManagerDuty->employee_id === (int) $employee->id;
-                
-                // Can approve if:
-                // - Is from_manager AND from_manager hasn't approved yet
-                // - OR is to_manager AND to_manager hasn't approved yet
-                $canApproveAsFromManager = $isFromManager && !$request->approved_by_from_manager;
-                $canApproveAsToManager = $isToManager && !$request->approved_by_to_manager;
-                
-                if ($canApproveAsFromManager || $canApproveAsToManager) {
-                    $requestArray['current_user_can_approve_as_manager'] = true;
-                }
-                
-                // Check if already approved as manager
-                if (($isFromManager && $request->approved_by_from_manager) || 
-                    ($isToManager && $request->approved_by_to_manager)) {
+                if ($managerApproval['already_approved']) {
                     $requestArray['current_user_already_approved'] = true;
                 }
             }
@@ -225,8 +169,8 @@ class ShiftRequestController extends Controller
         // Check authorization
         $canView = false;
 
-        // Admin and managers can view all
-        if (in_array($user->role, [User::ROLE_ADMIN, User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER])) {
+        // Admin can view all
+        if ($user->role === User::ROLE_ADMIN) {
             $canView = true;
         }
 
@@ -238,56 +182,44 @@ class ShiftRequestController extends Controller
             }
         }
 
-        // Temporary manager assigned on related roster context can also view detail.
+        // Only assigned approver managers can view detail.
         if (!$canView && $employee) {
-            $fromManagerDuty = $this->resolveManagerDutyForContext(
-                (int) $shiftRequest->from_roster_day_id,
-                (string) $shiftRequest->requester_notes,
-                $shiftRequest->requesterEmployee?->group_number
-            );
-
-            $toManagerDuty = $this->resolveManagerDutyForContext(
-                (int) $shiftRequest->to_roster_day_id,
-                (string) $shiftRequest->target_notes,
-                $shiftRequest->targetEmployee?->group_number
-            );
-
-            $canView = (
-                ($fromManagerDuty && (int) $fromManagerDuty->employee_id === (int) $employee->id)
-                || ($toManagerDuty && (int) $toManagerDuty->employee_id === (int) $employee->id)
-            );
+            $managerApproval = $this->getManagerApprovalContext($shiftRequest, $user, $employee);
+            $canView = $managerApproval['is_related_manager'];
         }
 
         if (!$canView) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 
-        $fromManagerDuty = $this->resolveManagerDutyForContext(
-            (int) $shiftRequest->from_roster_day_id,
-            (string) $shiftRequest->requester_notes,
-            $shiftRequest->requesterEmployee?->group_number
-        );
-
-        $toManagerDuty = $this->resolveManagerDutyForContext(
-            (int) $shiftRequest->to_roster_day_id,
-            (string) $shiftRequest->target_notes,
-            $shiftRequest->targetEmployee?->group_number
-        );
+        $approvers = $this->resolveManagerApprovers($shiftRequest);
+        $fromManagerDuty = $approvers['from_manager_duty'];
+        $toManagerDuty = $approvers['to_manager_duty'];
+        $fromManagerEmployee = $approvers['from_manager_employee_id']
+            ? Employee::with('user')->find($approvers['from_manager_employee_id'])
+            : null;
+        $toManagerEmployee = $approvers['to_manager_employee_id']
+            ? Employee::with('user')->find($approvers['to_manager_employee_id'])
+            : null;
 
         return response()->json([
             'data' => $shiftRequest,
             'managers' => [
-                'from_manager' => $fromManagerDuty ? [
-                    'id' => $fromManagerDuty->employee_id,
-                    'name' => $fromManagerDuty->employee->user->name ?? 'N/A',
+                'from_manager' => ($fromManagerDuty || $fromManagerEmployee) ? [
+                    'id' => $fromManagerDuty?->employee_id ?? $fromManagerEmployee?->id,
+                    'name' => $fromManagerDuty?->employee?->user?->name
+                        ?? $fromManagerEmployee?->user?->name
+                        ?? 'N/A',
                 ] : null,
-                'to_manager' => $toManagerDuty ? [
-                    'id' => $toManagerDuty->employee_id,
-                    'name' => $toManagerDuty->employee->user->name ?? 'N/A',
+                'to_manager' => ($toManagerDuty || $toManagerEmployee) ? [
+                    'id' => $toManagerDuty?->employee_id ?? $toManagerEmployee?->id,
+                    'name' => $toManagerDuty?->employee?->user?->name
+                        ?? $toManagerEmployee?->user?->name
+                        ?? 'N/A',
                 ] : null,
-                'is_same_manager' => $fromManagerDuty && $toManagerDuty
-                    ? ((int) $fromManagerDuty->employee_id === (int) $toManagerDuty->employee_id)
-                    : false,
+                'is_same_manager' => $approvers['from_manager_employee_id'] !== null
+                    && $approvers['to_manager_employee_id'] !== null
+                    && (int) $approvers['from_manager_employee_id'] === (int) $approvers['to_manager_employee_id'],
             ],
         ]);
     }
@@ -324,6 +256,8 @@ class ShiftRequestController extends Controller
                 'target_notes' => $validated['target_notes'],
                 'reason' => $validated['reason'] ?? null,
                 'status' => ShiftRequest::STATUS_PENDING,
+                'from_manager_id' => null,
+                'to_manager_id' => null,
             ]);
 
             // Load relationships for response
@@ -334,15 +268,17 @@ class ShiftRequestController extends Controller
                 'toRosterDay',
             ]);
 
+            $approvers = $this->persistManagerApproverIds($shiftRequest);
+
             // Notify target employee
             $targetEmployee = Employee::findOrFail($validated['target_employee_id']);
             
             // Build detailed message
             $fromDate = Carbon::parse($shiftRequest->fromRosterDay->work_date)->format('d M Y');
             $toDate = Carbon::parse($shiftRequest->toRosterDay->work_date)->format('d M Y');
-            $detailedMessage = Auth::user()->name . ' mengajukan tukar shift:\n'
-                . '• Shift Anda: ' . $fromDate . ' (' . $shiftRequest->requester_notes . ')\n'
-                . '• Ditukar dengan: ' . $toDate . ' (' . $shiftRequest->target_notes . ')';
+            $detailedMessage = Auth::user()->name . ' mengajukan tukar lintas tanggal dan meminta persetujuan Anda:\n'
+                . '• Shift asal requester: ' . $fromDate . ' (' . $shiftRequest->requester_notes . ')\n'
+                . '• Shift tujuan requester: ' . $toDate . ' (' . $shiftRequest->target_notes . ')';
             
             Notification::create([
                 'user_id' => $targetEmployee->user_id,
@@ -372,7 +308,7 @@ class ShiftRequestController extends Controller
             ]);
 
             // Notify managers immediately when request is submitted
-            $this->notifyManagers($shiftRequest);
+            $this->notifyManagers($shiftRequest, $approvers);
 
             Log::info('[shift_request][create] Swap request committed', [
                 'shift_request_id' => $shiftRequest->id,
@@ -558,20 +494,15 @@ class ShiftRequestController extends Controller
             }
         }
 
-        $fromManagerDuty = $this->resolveManagerDutyForContext(
-            (int) $shiftRequest->from_roster_day_id,
-            (string) $shiftRequest->requester_notes,
-            $shiftRequest->requesterEmployee?->group_number
-        );
+        $approvers = $this->resolveManagerApprovers($shiftRequest);
+        $fromManagerDuty = $approvers['from_manager_duty'];
+        $toManagerDuty = $approvers['to_manager_duty'];
 
-        $toManagerDuty = $this->resolveManagerDutyForContext(
-            (int) $shiftRequest->to_roster_day_id,
-            (string) $shiftRequest->target_notes,
-            $shiftRequest->targetEmployee?->group_number
-        );
-
-        $isFromManager = $fromManagerDuty && (int) $fromManagerDuty->employee_id === (int) $employee->id;
-        $isToManager = $toManagerDuty && (int) $toManagerDuty->employee_id === (int) $employee->id;
+        $managerApproval = $this->getManagerApprovalContext($shiftRequest, $user, $employee);
+        $isFromManager = $managerApproval['is_from_manager'];
+        $isToManager = $managerApproval['is_to_manager'];
+        $fromManagerEmployeeId = $approvers['from_manager_employee_id'];
+        $toManagerEmployeeId = $approvers['to_manager_employee_id'];
 
         \Log::info('approveByManager check', [
             'employee_id' => $employee->id,
@@ -579,11 +510,11 @@ class ShiftRequestController extends Controller
             'isToManager' => $isToManager,
             'requester_notes' => $shiftRequest->requester_notes,
             'target_notes' => $shiftRequest->target_notes,
-            'from_manager_employee_id' => $fromManagerDuty?->employee_id,
-            'to_manager_employee_id' => $toManagerDuty?->employee_id,
+            'from_manager_employee_id' => $fromManagerEmployeeId,
+            'to_manager_employee_id' => $toManagerEmployeeId,
         ]);
 
-        if (!$isFromManager && !$isToManager) {
+        if (!$managerApproval['is_related_manager']) {
             return response()->json([
                 'message' => 'Anda bukan manager untuk shift yang terlibat dalam permintaan ini'
             ], 403);
@@ -592,9 +523,9 @@ class ShiftRequestController extends Controller
         DB::beginTransaction();
         try {
             // Check if same manager handles both shifts
-            $isSameManager = $fromManagerDuty
-                && $toManagerDuty
-                && (int) $fromManagerDuty->employee_id === (int) $toManagerDuty->employee_id;
+            $isSameManager = $fromManagerEmployeeId !== null
+                && $toManagerEmployeeId !== null
+                && (int) $fromManagerEmployeeId === (int) $toManagerEmployeeId;
 
             if ($isSameManager) {
                 // Single manager approval - approve both at once
@@ -680,26 +611,10 @@ class ShiftRequestController extends Controller
             $canReject = true;
         }
 
-        // Manager can reject if currently assigned as manager duty on involved shift/date
+        // Manager can reject only if they are one of the two assigned approvers.
         if ($employee) {
-            $requesterShiftId = $shiftRequest->getRequesterShiftId();
-            $targetShiftId = $shiftRequest->getTargetShiftId();
-
-            $isFromManager = $requesterShiftId
-                ? ManagerDuty::where('roster_day_id', $shiftRequest->from_roster_day_id)
-                    ->where('employee_id', $employee->id)
-                    ->where('shift_id', $requesterShiftId)
-                    ->exists()
-                : false;
-
-            $isToManager = $targetShiftId
-                ? ManagerDuty::where('roster_day_id', $shiftRequest->to_roster_day_id)
-                    ->where('employee_id', $employee->id)
-                    ->where('shift_id', $targetShiftId)
-                    ->exists()
-                : false;
-
-            if ($isFromManager || $isToManager) {
+            $managerApproval = $this->getManagerApprovalContext($shiftRequest, $user, $employee);
+            if ($managerApproval['is_related_manager']) {
                 $canReject = true;
             }
         }
@@ -932,86 +847,275 @@ class ShiftRequestController extends Controller
             })
             ->get();
 
-        if ($exactShiftCandidates->count() === 1) {
-            return $exactShiftCandidates->first();
+        if ($exactShiftCandidates->isNotEmpty()) {
+            return $exactShiftCandidates
+                ->sort(function ($a, $b) {
+                    $aFixed = (int) ($a->employee->is_fixed_manager ?? 0);
+                    $bFixed = (int) ($b->employee->is_fixed_manager ?? 0);
+
+                    if ($aFixed !== $bFixed) {
+                        return $bFixed <=> $aFixed;
+                    }
+
+                    return ((int) ($a->employee_id ?? 0)) <=> ((int) ($b->employee_id ?? 0));
+                })
+                ->first();
         }
 
         return null;
     }
 
     /**
+     * Resolve exactly two approvers (from manager + to manager) for a swap request.
+     */
+    private function resolveManagerApprovers(ShiftRequest $shiftRequest): array
+    {
+        $shiftRequest->loadMissing([
+            'requesterEmployee.user',
+            'targetEmployee.user',
+            'fromRosterDay',
+            'toRosterDay',
+        ]);
+
+        if ($this->isManagerToManagerSwap($shiftRequest)) {
+            $generalManagerUsers = Employee::query()
+                ->whereIn('id', $this->getGeneralManagerEmployeeIds())
+                ->with('user')
+                ->get()
+                ->pluck('user')
+                ->filter()
+                ->keyBy('id')
+                ->all();
+
+            return [
+                'from_manager_duty' => null,
+                'to_manager_duty' => null,
+                'from_manager_employee_id' => null,
+                'to_manager_employee_id' => null,
+                'users_by_id' => $generalManagerUsers,
+                'is_manager_to_manager' => true,
+            ];
+        }
+
+        $fromManagerEmployeeId = $shiftRequest->from_manager_id !== null
+            ? (int) $shiftRequest->from_manager_id
+            : null;
+        $toManagerEmployeeId = $shiftRequest->to_manager_id !== null
+            ? (int) $shiftRequest->to_manager_id
+            : null;
+
+        $fromManagerDuty = null;
+        $toManagerDuty = null;
+
+        if ($fromManagerEmployeeId === null) {
+            $fromManagerDuty = $this->resolveManagerDutyForContext(
+                (int) $shiftRequest->from_roster_day_id,
+                (string) $shiftRequest->requester_notes,
+                $shiftRequest->requesterEmployee?->group_number
+            );
+
+            if (!$fromManagerDuty) {
+                $fromManagerDuty = $this->resolveManagerDutyForContext(
+                    (int) $shiftRequest->from_roster_day_id,
+                    (string) $shiftRequest->requester_notes,
+                    null
+                );
+            }
+
+            if ($fromManagerDuty?->employee_id) {
+                $fromManagerEmployeeId = (int) $fromManagerDuty->employee_id;
+            }
+
+            if ($fromManagerEmployeeId === null) {
+                $fromManagerEmployeeId = $this->resolveManagerEmployeeIdByGroup($shiftRequest->requesterEmployee?->group_number);
+            }
+        }
+
+        if ($toManagerEmployeeId === null) {
+            $toManagerDuty = $this->resolveManagerDutyForContext(
+                (int) $shiftRequest->to_roster_day_id,
+                (string) $shiftRequest->target_notes,
+                $shiftRequest->targetEmployee?->group_number
+            );
+
+            if (!$toManagerDuty) {
+                $toManagerDuty = $this->resolveManagerDutyForContext(
+                    (int) $shiftRequest->to_roster_day_id,
+                    (string) $shiftRequest->target_notes,
+                    null
+                );
+            }
+
+            if ($toManagerDuty?->employee_id) {
+                $toManagerEmployeeId = (int) $toManagerDuty->employee_id;
+            }
+
+            if ($toManagerEmployeeId === null) {
+                $toManagerEmployeeId = $this->resolveManagerEmployeeIdByGroup($shiftRequest->targetEmployee?->group_number);
+            }
+        }
+
+        $usersById = [];
+        $managerEmployeeIds = array_values(array_unique(array_filter([
+            $fromManagerEmployeeId,
+            $toManagerEmployeeId,
+        ])));
+
+        if (!empty($managerEmployeeIds)) {
+            $managerEmployees = Employee::query()
+                ->whereIn('id', $managerEmployeeIds)
+                ->with('user')
+                ->get();
+
+            foreach ($managerEmployees as $managerEmployee) {
+                if ($managerEmployee->user) {
+                    $usersById[$managerEmployee->user->id] = $managerEmployee->user;
+                }
+            }
+        }
+
+        if ($fromManagerDuty?->employee?->user) {
+            $usersById[$fromManagerDuty->employee->user_id] = $fromManagerDuty->employee->user;
+        }
+        if ($toManagerDuty?->employee?->user) {
+            $usersById[$toManagerDuty->employee->user_id] = $toManagerDuty->employee->user;
+        }
+
+        return [
+            'from_manager_duty' => $fromManagerDuty,
+            'to_manager_duty' => $toManagerDuty,
+            'from_manager_employee_id' => $fromManagerEmployeeId,
+            'to_manager_employee_id' => $toManagerEmployeeId,
+            'users_by_id' => $usersById,
+            'is_manager_to_manager' => false,
+        ];
+    }
+
+    private function resolveManagerEmployeeIdByGroup(?int $groupNumber): ?int
+    {
+        if (!$groupNumber) {
+            return null;
+        }
+
+        $fixedManager = Employee::query()
+            ->where('group_number', $groupNumber)
+            ->where('is_active', true)
+            ->where('is_fixed_manager', true)
+            ->whereHas('user', function ($q) {
+                $q->whereIn('role', [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER]);
+            })
+            ->orderBy('id')
+            ->first();
+
+        if ($fixedManager) {
+            return (int) $fixedManager->id;
+        }
+
+        $groupManager = Employee::query()
+            ->where('group_number', $groupNumber)
+            ->where('is_active', true)
+            ->whereHas('user', function ($q) {
+                $q->whereIn('role', [User::ROLE_MANAGER_TEKNIK, User::ROLE_GENERAL_MANAGER]);
+            })
+            ->orderBy('id')
+            ->first();
+
+        return $groupManager ? (int) $groupManager->id : null;
+    }
+
+    private function persistManagerApproverIds(ShiftRequest $shiftRequest): array
+    {
+        $approvers = $this->resolveManagerApprovers($shiftRequest);
+
+        if ($approvers['is_manager_to_manager']) {
+            return $approvers;
+        }
+
+        $fromManagerEmployeeId = $approvers['from_manager_employee_id'];
+        $toManagerEmployeeId = $approvers['to_manager_employee_id'];
+
+        $hasChanges = ((int) ($shiftRequest->from_manager_id ?? 0) !== (int) ($fromManagerEmployeeId ?? 0))
+            || ((int) ($shiftRequest->to_manager_id ?? 0) !== (int) ($toManagerEmployeeId ?? 0));
+
+        if ($hasChanges) {
+            $shiftRequest->from_manager_id = $fromManagerEmployeeId;
+            $shiftRequest->to_manager_id = $toManagerEmployeeId;
+            $shiftRequest->save();
+        }
+
+        return $approvers;
+    }
+
+    /**
+     * Compute manager-approval context for current user based on unified approver resolution.
+     */
+    private function getManagerApprovalContext(ShiftRequest $shiftRequest, User $user, ?Employee $employee): array
+    {
+        if (!$employee) {
+            return [
+                'is_related_manager' => false,
+                'is_from_manager' => false,
+                'is_to_manager' => false,
+                'can_approve' => false,
+                'already_approved' => false,
+            ];
+        }
+
+        $approvers = $this->resolveManagerApprovers($shiftRequest);
+
+        if ($approvers['is_manager_to_manager']) {
+            $isRelated = $user->role === User::ROLE_GENERAL_MANAGER;
+            $canApprove = $isRelated
+                && $shiftRequest->status === ShiftRequest::STATUS_PENDING
+                && (!$shiftRequest->approved_by_from_manager || !$shiftRequest->approved_by_to_manager);
+            $alreadyApproved = $isRelated
+                && $shiftRequest->approved_by_from_manager
+                && $shiftRequest->approved_by_to_manager;
+
+            return [
+                'is_related_manager' => $isRelated,
+                'is_from_manager' => $isRelated,
+                'is_to_manager' => $isRelated,
+                'can_approve' => $canApprove,
+                'already_approved' => $alreadyApproved,
+            ];
+        }
+
+        $employeeId = (int) $employee->id;
+        $isFromManager = $approvers['from_manager_employee_id'] !== null
+            && (int) $approvers['from_manager_employee_id'] === $employeeId;
+        $isToManager = $approvers['to_manager_employee_id'] !== null
+            && (int) $approvers['to_manager_employee_id'] === $employeeId;
+        $isRelatedManager = $isFromManager || $isToManager;
+
+        $canApprove = $shiftRequest->status === ShiftRequest::STATUS_PENDING
+            && (($isFromManager && !$shiftRequest->approved_by_from_manager)
+                || ($isToManager && !$shiftRequest->approved_by_to_manager));
+
+        $alreadyApproved = ($isFromManager && $shiftRequest->approved_by_from_manager)
+            || ($isToManager && $shiftRequest->approved_by_to_manager);
+
+        return [
+            'is_related_manager' => $isRelatedManager,
+            'is_from_manager' => $isFromManager,
+            'is_to_manager' => $isToManager,
+            'can_approve' => $canApprove,
+            'already_approved' => $alreadyApproved,
+        ];
+    }
+
+    /**
      * Notify managers about shift request.
      */
-    private function notifyManagers(ShiftRequest $shiftRequest): void
+    private function notifyManagers(ShiftRequest $shiftRequest, ?array $approvers = null): void
     {
         Log::info('[shift_request][notify_manager] Called', [
             'shift_request_id' => $shiftRequest->id,
             'time' => now()->toDateTimeString(),
         ]);
 
-        $managersToNotify = [];
-
-        // Special case: manager-to-manager swap should be approved by General Manager only.
-        if ($this->isManagerToManagerSwap($shiftRequest)) {
-            $generalManagerEmployeeIds = $this->getGeneralManagerEmployeeIds();
-
-            if (!empty($generalManagerEmployeeIds)) {
-                $generalManagers = Employee::query()
-                    ->whereIn('id', $generalManagerEmployeeIds)
-                    ->with('user')
-                    ->get();
-
-                foreach ($generalManagers as $employee) {
-                    if ($employee->user) {
-                        $managersToNotify[$employee->user_id] = $employee->user;
-                    }
-                }
-            }
-
-            if (empty($managersToNotify)) {
-                Log::error('[shift_request][notify_manager] No General Manager found for manager-to-manager shift request', [
-                    'shift_request_id' => $shiftRequest->id,
-                ]);
-                return;
-            }
-        }
-
-        if (empty($managersToNotify)) {
-            // Source of truth: resolve manager by roster day + shift notes context
-            $fromManager = $this->resolveManagerDutyForContext(
-                (int) $shiftRequest->from_roster_day_id,
-                (string) $shiftRequest->requester_notes,
-                $shiftRequest->requesterEmployee?->group_number
-            );
-            $toManager = $this->resolveManagerDutyForContext(
-                (int) $shiftRequest->to_roster_day_id,
-                (string) $shiftRequest->target_notes,
-                $shiftRequest->targetEmployee?->group_number
-            );
-
-            if ($fromManager && $fromManager->employee && $fromManager->employee->user) {
-                $managersToNotify[$fromManager->employee->user_id] = $fromManager->employee->user;
-                Log::info('[shift_request][notify_manager] Found from_manager', [
-                    'employee_id' => $fromManager->employee_id,
-                    'user_id' => $fromManager->employee->user_id,
-                    'name' => $fromManager->employee->user->name,
-                    'email' => $fromManager->employee->user->email,
-                ]);
-            }
-
-            if ($toManager && $toManager->employee && $toManager->employee->user) {
-                // Add only if different from fromManager
-                if (!isset($managersToNotify[$toManager->employee->user_id])) {
-                    $managersToNotify[$toManager->employee->user_id] = $toManager->employee->user;
-                    Log::info('[shift_request][notify_manager] Found to_manager', [
-                        'employee_id' => $toManager->employee_id,
-                        'user_id' => $toManager->employee->user_id,
-                        'name' => $toManager->employee->user->name,
-                        'email' => $toManager->employee->user->email,
-                    ]);
-                }
-            }
-        }
+        $approvers = $approvers ?? $this->resolveManagerApprovers($shiftRequest);
+        $managersToNotify = $approvers['users_by_id'];
 
         Log::info('[shift_request][notify_manager] Candidate managers resolved', [
             'shift_request_id' => $shiftRequest->id,
@@ -1030,26 +1134,13 @@ class ShiftRequestController extends Controller
             })->values()->all(),
         ]);
 
-        // Fallback: if no specific managers found, notify all manager employees by role
-        if (empty($managersToNotify)) {
-            Log::warning('[shift_request][notify_manager] No specific shift managers found, notifying all manager employees');
-
-            $managerEmployeeIds = $this->getManagerEmployeeIds();
-            
-            $managerEmployees = Employee::whereIn('id', $managerEmployeeIds)
-                ->with('user')
-                ->get();
-
-            foreach ($managerEmployees as $employee) {
-                if ($employee->user) {
-                    $managersToNotify[$employee->user_id] = $employee->user;
-                }
-            }
-        }
-
         if (empty($managersToNotify)) {
             Log::error('[shift_request][notify_manager] No managers found at all for shift request', [
                 'shift_request_id' => $shiftRequest->id,
+                'from_roster_day_id' => $shiftRequest->from_roster_day_id,
+                'to_roster_day_id' => $shiftRequest->to_roster_day_id,
+                'requester_notes' => $shiftRequest->requester_notes,
+                'target_notes' => $shiftRequest->target_notes,
             ]);
             return;
         }
@@ -1098,20 +1189,17 @@ class ShiftRequestController extends Controller
      */
     private function notifyCancellationToManagers(ShiftRequest $shiftRequest): void
     {
-        $managerEmployeeIds = $this->getManagerEmployeeIds();
-        if (empty($managerEmployeeIds)) {
+        $approvers = $this->resolveManagerApprovers($shiftRequest);
+        $managersToNotify = $approvers['users_by_id'];
+
+        if (empty($managersToNotify)) {
+            Log::warning('[shift_request][notify_manager_cancel] No approver managers resolved for cancellation notification', [
+                'shift_request_id' => $shiftRequest->id,
+            ]);
             return;
         }
 
-        $managerUsers = Employee::query()
-            ->whereIn('id', $managerEmployeeIds)
-            ->with('user')
-            ->get()
-            ->pluck('user')
-            ->filter()
-            ->keyBy('id');
-
-        foreach ($managerUsers as $managerUser) {
+        foreach ($managersToNotify as $managerUser) {
             Notification::create([
                 'user_id' => $managerUser->id,
                 'sender_id' => Auth::id(),
@@ -1128,49 +1216,14 @@ class ShiftRequestController extends Controller
      */
     private function executeShiftSwap(ShiftRequest $shiftRequest): void
     {
-        // Swap shift payload (shift_id/notes/span_days) between requester and target
-        // on each involved date. We keep employee ownership unchanged to avoid
-        // empty cells (unassigned days) after swap.
-        $rosterDayIds = array_values(array_unique([
-            (int) $shiftRequest->from_roster_day_id,
-            (int) $shiftRequest->to_roster_day_id,
-        ]));
-
-        foreach ($rosterDayIds as $rosterDayId) {
-            $requesterAssignment = ShiftAssignment::where('roster_day_id', $rosterDayId)
-                ->where('employee_id', $shiftRequest->requester_employee_id)
-                ->first();
-
-            $targetAssignment = ShiftAssignment::where('roster_day_id', $rosterDayId)
-                ->where('employee_id', $shiftRequest->target_employee_id)
-                ->first();
-
-            if (!$requesterAssignment || !$targetAssignment) {
-                // If one side has no assignment, skip safely instead of creating blank/duplicate states.
-                continue;
-            }
-
-            $requesterShiftId = $requesterAssignment->shift_id;
-            $requesterNotes = $requesterAssignment->notes;
-            $requesterSpanDays = $requesterAssignment->span_days;
-
-            $requesterAssignment->shift_id = $targetAssignment->shift_id;
-            $requesterAssignment->notes = $targetAssignment->notes;
-            $requesterAssignment->span_days = $targetAssignment->span_days;
-
-            $targetAssignment->shift_id = $requesterShiftId;
-            $targetAssignment->notes = $requesterNotes;
-            $targetAssignment->span_days = $requesterSpanDays;
-
-            $requesterAssignment->save();
-            $targetAssignment->save();
-        }
+        // Keep roster baseline immutable for rostered-staff view.
+        // Completed swap requests are applied as calendar overlays in frontend.
 
         // Notify both parties
         Notification::create([
             'user_id' => $shiftRequest->requesterEmployee->user_id,
             'title' => 'Tukar Shift Selesai',
-            'message' => 'Tukar shift dengan ' . $shiftRequest->targetEmployee->user->name . ' telah berhasil dieksekusi',
+            'message' => 'Tukar shift Anda dengan ' . $shiftRequest->targetEmployee->user->name . ' telah berhasil dieksekusi.',
             'category' => 'shift_request',
             'reference_id' => $shiftRequest->id,
         ]);
@@ -1178,7 +1231,7 @@ class ShiftRequestController extends Controller
         Notification::create([
             'user_id' => $shiftRequest->targetEmployee->user_id,
             'title' => 'Tukar Shift Selesai',
-            'message' => 'Tukar shift dengan ' . $shiftRequest->requesterEmployee->user->name . ' telah berhasil dieksekusi',
+            'message' => 'Tukar shift Anda dengan ' . $shiftRequest->requesterEmployee->user->name . ' telah berhasil dieksekusi.',
             'category' => 'shift_request',
             'reference_id' => $shiftRequest->id,
         ]);
@@ -1286,11 +1339,10 @@ class ShiftRequestController extends Controller
     public function getAvailablePartners(Request $request)
     {
         $request->validate([
-            'roster_day_id' => 'sometimes|exists:roster_days,id',
-            'shift_id' => 'sometimes|exists:shifts,id',
-            'employee_id' => 'sometimes|exists:employees,id',
             'from_roster_day_id' => 'sometimes|exists:roster_days,id',
-            'requester_notes' => 'sometimes|string',
+            'requester_notes' => 'sometimes|string|max:50',
+            'roster_month' => 'sometimes|integer|min:1|max:12',
+            'roster_year' => 'sometimes|integer|min:2000|max:2100',
         ]);
 
         $currentEmployee = Auth::user()->employee;
@@ -1311,130 +1363,139 @@ class ShiftRequestController extends Controller
             ], 403);
         }
 
+        $fromRosterDayId = $request->integer('from_roster_day_id');
+        $requesterNotes = trim((string) $request->input('requester_notes', ''));
+        $rosterMonth = $request->integer('roster_month');
+        $rosterYear = $request->integer('roster_year');
+        $hasSpecificSource = $fromRosterDayId && $requesterNotes !== '';
+        $normalizedRequesterNotes = strtolower($requesterNotes);
+
+        if ($hasSpecificSource && $this->isOffDayNotes($normalizedRequesterNotes)) {
+            return response()->json([
+                'data' => [],
+                'count' => 0,
+                'message' => 'Shift asal harus shift kerja, bukan libur/cuti/off.',
+            ]);
+        }
+
         // Minimum H-3 from now
         $minDate = Carbon::now()->addDays(3)->startOfDay()->toDateString();
 
-        // Get requester's selected shift info for filtering
-        $fromRosterDayId = $request->input('from_roster_day_id');
-        $requesterNotes = $request->input('requester_notes');
-
-        // Off-day notes
-        $offDayNotes = ['l', 'l1', 'l2', 'ct', 'cs', 'dl', 'tb', 'off', 'libur', 'cuti'];
-
-        // Get requester's off-day roster_day_ids (days where they have Libur, L, L1, L2, etc.)
-        $requesterOffDays = ShiftAssignment::where('employee_id', $currentEmployee->id)
-            ->whereHas('rosterDay', function ($q) use ($minDate) {
-                $q->where('work_date', '>=', $minDate)
-                    ->whereHas('rosterPeriod', function ($query) {
-                        $query->where('status', 'published');
-                    });
-            })
-            ->where(function ($q) use ($offDayNotes) {
-                $q->whereRaw('LOWER(TRIM(notes)) IN (' . implode(',', array_map(fn($s) => "'$s'", $offDayNotes)) . ')')
-                  ->orWhereRaw('LOWER(TRIM(notes)) LIKE \'libur%\'')
-                  ->orWhereRaw('LOWER(TRIM(notes)) LIKE \'cuti%\'')
-                  ->orWhereRaw('LOWER(TRIM(notes)) LIKE \'off%\'');
-            })
-            ->pluck('roster_day_id')
-            ->toArray();
-
-        // Build query for available partner shifts
-        $query = ShiftAssignment::with(['employee.user', 'rosterDay', 'shift'])
-            ->where('employee_id', '!=', $currentEmployee->id)
-            // Only include assignments with valid notes
-            ->whereNotNull('notes')
-            ->where('notes', '!=', '')
-            // EXCLUDE Libur shifts from being target (user request)
-            ->where(function ($q) use ($offDayNotes) {
-                $q->whereRaw('LOWER(TRIM(notes)) NOT IN (' . implode(',', array_map(fn($s) => "'$s'", $offDayNotes)) . ')')
-                  ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'libur%\'')
-                  ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'cuti%\'')
-                  ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'off%\'');
-            })
-            ->whereHas('rosterDay', function ($q) use ($minDate) {
-                // Only future dates (H-3) from published rosters
-                $q->where('work_date', '>=', $minDate)
-                    ->whereHas('rosterPeriod', function ($query) {
-                        $query->where('status', 'published');
-                    });
-            })
-            // Filter by: days where requester is off OR same day with different shift
-            ->where(function ($q) use ($requesterOffDays, $fromRosterDayId, $requesterNotes) {
-                // Allow shifts on days where requester has off-day
-                if (!empty($requesterOffDays)) {
-                    $q->whereIn('roster_day_id', $requesterOffDays);
-                }
-                
-                // Also allow same day swap with different shift
-                if ($fromRosterDayId && $requesterNotes) {
-                    $q->orWhere(function ($subQ) use ($fromRosterDayId, $requesterNotes) {
-                        $subQ->where('roster_day_id', $fromRosterDayId)
-                             ->whereRaw('LOWER(TRIM(notes)) != ?', [strtolower(trim($requesterNotes))]);
-                    });
-                }
-            });
-
-        // Filter by roster day if provided
-        if ($request->has('roster_day_id')) {
-            $query->where('roster_day_id', $request->roster_day_id);
-        }
-
-        // Filter by shift if provided
-        if ($request->has('shift_id')) {
-            $query->where('shift_id', $request->shift_id);
-        }
-
-        // Filter by specific employee if provided
-        if ($request->has('employee_id')) {
-            $query->where('employee_id', $request->employee_id);
-        }
-
-        // Filter by same role (employee_type)
-        $query->whereHas('employee', function ($q) use ($currentEmployee, $allowedSwapGrades) {
-            $q->where('employee_type', $currentEmployee->employee_type)
-                ->where('is_active', true);
-
-            // Apply grade compatibility filter:
-            // - Same grade is always allowed
-            // - Special cross-grade pairs: 14<->13, 12<->11
-            // - Grade group 8,9,10 can swap with each other
-            // - Grade 15 can only swap with the same grade
-            if (!empty($allowedSwapGrades)) {
-                $q->whereHas('user', function ($uq) use ($allowedSwapGrades) {
-                    $uq->whereIn('grade', $allowedSwapGrades);
-                });
+        $rosterPeriodFilter = function ($query) use ($rosterMonth, $rosterYear) {
+            $query->where('status', 'published');
+            if ($rosterMonth) {
+                $query->where('month', $rosterMonth);
             }
-        });
-
-        $assignments = $query->get()->filter(function ($assignment) use ($fromRosterDayId, $offDayNotes) {
-            if (!$fromRosterDayId) {
-                return true;
+            if ($rosterYear) {
+                $query->where('year', $rosterYear);
             }
+        };
 
-            $isSameDaySwap = (int) $assignment->roster_day_id === (int) $fromRosterDayId;
-            if ($isSameDaySwap) {
-                return true;
-            }
+        $requesterSources = collect();
 
-            // Prevent showing target shifts that would make the target employee
-            // hold two working shifts on the requester's source day after swap.
-            $targetHasWorkingShiftOnFromDay = ShiftAssignment::where('roster_day_id', $fromRosterDayId)
-                ->where('employee_id', $assignment->employee_id)
-                ->where(function ($q) use ($offDayNotes) {
-                    $q->whereRaw('LOWER(TRIM(notes)) NOT IN (' . implode(',', array_map(fn($s) => "'$s'", $offDayNotes)) . ')')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'libur%\'')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'cuti%\'')
-                      ->whereRaw('LOWER(TRIM(notes)) NOT LIKE \'off%\'');
+        if ($hasSpecificSource) {
+            // Requester must actually have the selected source shift on selected date.
+            $requesterHasSourceShift = ShiftAssignment::query()
+                ->where('employee_id', $currentEmployee->id)
+                ->where('roster_day_id', $fromRosterDayId)
+                ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedRequesterNotes])
+                ->whereHas('rosterDay', function ($q) use ($minDate, $rosterPeriodFilter) {
+                    $q->where('work_date', '>=', $minDate)
+                        ->whereHas('rosterPeriod', $rosterPeriodFilter);
                 })
                 ->exists();
 
-            return !$targetHasWorkingShiftOnFromDay;
-        })->map(function ($assignment) {
-            // Check if this shift already has a pending request targeting it
-            $hasPendingRequest = ShiftRequest::where('status', ShiftRequest::STATUS_PENDING)
+            if (!$requesterHasSourceShift) {
+                return response()->json([
+                    'data' => [],
+                    'count' => 0,
+                    'message' => 'Anda tidak memiliki shift asal tersebut pada tanggal yang dipilih.',
+                ]);
+            }
+
+            $requesterSources = collect([[
+                'roster_day_id' => (int) $fromRosterDayId,
+                'normalized_notes' => $normalizedRequesterNotes,
+            ]]);
+        } else {
+            // Preload mode: collect requester's all eligible working shifts (for flexible UI ordering).
+            $requesterSources = ShiftAssignment::query()
+                ->select('roster_day_id', 'notes')
+                ->where('employee_id', $currentEmployee->id)
+                ->whereNotNull('notes')
+                ->where('notes', '!=', '')
+                ->whereHas('rosterDay', function ($q) use ($minDate, $rosterPeriodFilter) {
+                    $q->where('work_date', '>=', $minDate)
+                        ->whereHas('rosterPeriod', $rosterPeriodFilter);
+                })
+                ->get()
+                ->map(function ($assignment) {
+                    return [
+                        'roster_day_id' => (int) $assignment->roster_day_id,
+                        'normalized_notes' => strtolower(trim((string) $assignment->notes)),
+                    ];
+                })
+                ->filter(function ($item) {
+                    return !$this->isOffDayNotes($item['normalized_notes']);
+                })
+                ->unique(function ($item) {
+                    return $item['roster_day_id'] . ':' . $item['normalized_notes'];
+                })
+                ->values();
+
+            if ($requesterSources->isEmpty()) {
+                return response()->json([
+                    'data' => [],
+                    'count' => 0,
+                    'message' => 'Tidak ada shift kerja requester yang memenuhi syarat untuk swap.',
+                ]);
+            }
+        }
+
+        // Build query for partners: same day, different working shift.
+        $query = ShiftAssignment::with(['employee.user', 'rosterDay', 'shift'])
+            ->where('employee_id', '!=', $currentEmployee->id)
+            ->whereNotNull('notes')
+            ->where('notes', '!=', '')
+            ->whereHas('rosterDay', function ($q) use ($minDate, $rosterPeriodFilter) {
+                $q->where('work_date', '>=', $minDate)
+                    ->whereHas('rosterPeriod', $rosterPeriodFilter);
+            })
+            ->whereHas('employee', function ($q) use ($currentEmployee, $allowedSwapGrades) {
+                $q->where('employee_type', $currentEmployee->employee_type)
+                    ->where('is_active', true)
+                    ->whereHas('user', function ($uq) use ($allowedSwapGrades) {
+                        $uq->whereIn('grade', $allowedSwapGrades);
+                    });
+            });
+
+        if ($hasSpecificSource) {
+            $query->where('roster_day_id', $fromRosterDayId)
+                ->whereRaw('LOWER(TRIM(notes)) != ?', [$normalizedRequesterNotes]);
+        } else {
+            $query->where(function ($outer) use ($requesterSources) {
+                foreach ($requesterSources as $source) {
+                    $outer->orWhere(function ($inner) use ($source) {
+                        $inner->where('roster_day_id', $source['roster_day_id'])
+                            ->whereRaw('LOWER(TRIM(notes)) != ?', [$source['normalized_notes']]);
+                    });
+                }
+            });
+        }
+
+        $assignments = $query->get()->map(function ($assignment) {
+            $normalizedNotes = strtolower(trim((string) $assignment->notes));
+
+            if ($this->isOffDayNotes($normalizedNotes)) {
+                return null;
+            }
+
+            // Check if this partner-shift already has a pending request as target.
+            $hasPendingRequest = ShiftRequest::query()
+                ->where('status', ShiftRequest::STATUS_PENDING)
                 ->where('target_employee_id', $assignment->employee_id)
                 ->where('to_roster_day_id', $assignment->roster_day_id)
-                ->where('target_notes', $assignment->notes)
+                ->whereRaw('LOWER(TRIM(target_notes)) = ?', [$normalizedNotes])
                 ->exists();
 
             return [
@@ -1450,9 +1511,9 @@ class ShiftRequestController extends Controller
                 'notes' => $assignment->notes,
                 'has_pending_request' => $hasPendingRequest,
             ];
-        });
+        })->filter()->values();
 
-        // Group by employee for easier frontend handling
+        // Keep response structure compatible with existing frontend.
         $grouped = $assignments->groupBy('employee_id')->map(function ($items, $employeeId) {
             $first = $items->first();
             return [
@@ -1507,6 +1568,19 @@ class ShiftRequestController extends Controller
         return array_values(array_unique($allowedGrades));
     }
 
+    private function isOffDayNotes(string $notesLower): bool
+    {
+        $offDayNotes = ['l', 'l1', 'l2', 'ct', 'cs', 'dl', 'tb', 'off', 'libur', 'cuti'];
+
+        if (in_array($notesLower, $offDayNotes, true)) {
+            return true;
+        }
+
+        return str_starts_with($notesLower, 'libur')
+            || str_starts_with($notesLower, 'cuti')
+            || str_starts_with($notesLower, 'off');
+    }
+
     /**
      * GET /shift-requests/pending-count
      * Get count of pending requests for current user
@@ -1540,15 +1614,27 @@ class ShiftRequestController extends Controller
                     // Needs from_manager approval
                     $q->where(function ($subQ) use ($employee) {
                         $subQ->where('approved_by_from_manager', false)
-                            ->whereHas('fromRosterDay.managerDuties', function ($mq) use ($employee) {
-                                $mq->where('employee_id', $employee->id);
+                            ->where(function ($managerQ) use ($employee) {
+                                $managerQ->where('from_manager_id', $employee->id)
+                                    ->orWhere(function ($legacyQ) use ($employee) {
+                                        $legacyQ->whereNull('from_manager_id')
+                                            ->whereHas('fromRosterDay.managerDuties', function ($mq) use ($employee) {
+                                                $mq->where('employee_id', $employee->id);
+                                            });
+                                    });
                             });
                     })
                     // Or needs to_manager approval
                     ->orWhere(function ($subQ) use ($employee) {
                         $subQ->where('approved_by_to_manager', false)
-                            ->whereHas('toRosterDay.managerDuties', function ($mq) use ($employee) {
-                                $mq->where('employee_id', $employee->id);
+                            ->where(function ($managerQ) use ($employee) {
+                                $managerQ->where('to_manager_id', $employee->id)
+                                    ->orWhere(function ($legacyQ) use ($employee) {
+                                        $legacyQ->whereNull('to_manager_id')
+                                            ->whereHas('toRosterDay.managerDuties', function ($mq) use ($employee) {
+                                                $mq->where('employee_id', $employee->id);
+                                            });
+                                    });
                             });
                     });
                 })

@@ -32,6 +32,11 @@ Route::prefix('auth')->group(function () {
 // PROTECTED ROUTES (Require Authentication)
 // =======================================
 Route::middleware('auth:sanctum')->group(function () {
+
+    // =======================================
+    // USERS (Read-only for all authenticated users)
+    // =======================================
+    Route::get('/users', [AdminUserController::class, 'index']);
     
     // =======================================
     // ADMIN - USER & EMPLOYEE MANAGEMENT
@@ -121,6 +126,7 @@ Route::middleware('auth:sanctum')->group(function () {
         // Employee routes - any authenticated user can access
         Route::get('/my-requests', [LeaveRequestController::class, 'myRequests']);
         Route::get('/statistics', [LeaveRequestController::class, 'statistics']);
+        Route::get('/approval-preview', [LeaveRequestController::class, 'approvalPreview']);
         Route::post('/', [LeaveRequestController::class, 'store']);
         Route::get('/{id}/document', [LeaveRequestController::class, 'document']);
         Route::get('/{id}', [LeaveRequestController::class, 'show']);

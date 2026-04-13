@@ -59,13 +59,15 @@ class DatabaseSeeder extends Seeder
         ];
 
         // ================================
-        // MANAGER TEKNIK (3 employees - Grade 15)
-        // Fixed: Andi MT 2, Efried MT 3, Netty MT 5 - tidak bisa diubah
+        // MANAGER TEKNIK (5 employees - Grade 15)
+        // Fixed managers - cannot be removed or changed by roster actions
         // ================================
         $managerTeknik = [
-            ['name' => 'Andi Wibowo', 'kelas' => 15, 'jabatan' => 'MT 2', 'group' => 1],
-            ['name' => 'Efried N.P.', 'kelas' => 15, 'jabatan' => 'MT 3', 'group' => 1],
-            ['name' => 'Netty Septa C.', 'kelas' => 15, 'jabatan' => 'MT 5', 'group' => 1],
+            ['name' => 'Dudik Fahrudin Sukarno', 'kelas' => 15, 'jabatan' => 'MT 1', 'group' => 1],
+            ['name' => 'Andi Wibowo', 'kelas' => 15, 'jabatan' => 'MT 2', 'group' => 2],
+            ['name' => 'Efried Nara Perkasa', 'kelas' => 15, 'jabatan' => 'MT 3', 'group' => 3],
+            ['name' => 'Alam Fahmi', 'kelas' => 15, 'jabatan' => 'MT 4', 'group' => 4],
+            ['name' => 'Netty Septa Cristila', 'kelas' => 15, 'jabatan' => 'MT 5', 'group' => 5],
         ];
 
         // ================================
@@ -145,7 +147,7 @@ class DatabaseSeeder extends Seeder
 
         // Manager Teknik - fixed positions, cannot be changed
         foreach ($managerTeknik as $emp) {
-            $isFixed = in_array($emp['name'], ['Andi Wibowo', 'Efried N.P.', 'Netty Septa C.']);
+            $isFixed = true;
             $this->createEmployee($emp, 'manager_teknik', $isFixed);
         }
 
@@ -162,17 +164,19 @@ class DatabaseSeeder extends Seeder
         $this->command->info('✅ Admin user created: admin@airnav.com / password');
         $this->command->info('✅ Airnav employees created:');
         $this->command->info('   - General Manager: 1 employee');
-        $this->command->info('   - Manager Teknik: 3 employees (FIXED - cannot remove):');
+        $this->command->info('   - Manager Teknik: 5 employees (FIXED - cannot remove):');
+        $this->command->info('     • Dudik Fahrudin Sukarno → MT 1, grade 15 ✅ FIXED');
         $this->command->info('     • Andi Wibowo → MT 2, grade 15 ✅ FIXED');
-        $this->command->info('     • Efried N.P. → MT 3, grade 15 ✅ FIXED');
-        $this->command->info('     • Netty Septa C. → MT 5, grade 15 ✅ FIXED');
+        $this->command->info('     • Efried Nara Perkasa → MT 3, grade 15 ✅ FIXED');
+        $this->command->info('     • Alam Fahmi → MT 4, grade 15 ✅ FIXED');
+        $this->command->info('     • Netty Septa Cristila → MT 5, grade 15 ✅ FIXED');
         $this->command->info('   - CNSD Telekomunikasi: 31 employees (CNS)');
         $this->command->info('     • Aditya Huzairi P → CNS, grade 13 (SVP CNS)');
         $this->command->info('     • Moch. Ichsan, Nur Hukim → SPV CNS');
         $this->command->info('   - TFP Fasilitas Penunjang: 17 employees (Support)');
         $this->command->info('     • Fajar Kusuma W → Support, grade 13 (SPV TFP)');
         $this->command->info('     • Priyoko → SPV TFP');
-        $this->command->info('   Total: 52 employees + 1 admin = 53 users');
+        $this->command->info('   Total: 54 employees + 1 admin = 55 users');
         $this->command->info('✅ All users password: password');
         $this->command->info('✅ Email format: user1@airnav.com, user2@airnav.com, ...');
         $this->command->info('✅ Groups hanya digunakan dalam konteks rostering');
@@ -205,6 +209,11 @@ class DatabaseSeeder extends Seeder
                 break;
         }
 
+        $defaultGroupNumber = $data['group'] ?? null;
+        if ($type === 'manager_teknik' && $defaultGroupNumber === null && isset($data['jabatan']) && preg_match('/^MT\s*(\d+)$/i', $data['jabatan'], $matches)) {
+            $defaultGroupNumber = (int) $matches[1];
+        }
+
         // Create user with same password for all
         $user = User::create([
             'name' => $data['name'],
@@ -219,7 +228,7 @@ class DatabaseSeeder extends Seeder
         $user->employee()->create([
             'employee_type' => $employeeType,
             'is_active' => true,
-            'group_number' => $data['group'] ?? null,
+            'group_number' => $defaultGroupNumber,
             'is_fixed_manager' => $isFixedManager,
         ]);
     }

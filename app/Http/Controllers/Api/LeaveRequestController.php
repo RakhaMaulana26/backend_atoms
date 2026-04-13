@@ -711,6 +711,76 @@ class LeaveRequestController extends Controller
     }
 
     /**
+     * GET /leave-requests/approval-preview
+     * Preview managers who will approve a leave request for selected date range
+     */
+    public function approvalPreview(Request $request)
+    {
+        $employee = Auth::user()->employee;
+
+        if (!$employee) {
+            return response()->json([
+                'message' => 'You must be an employee to preview leave approvers',
+            ], 403);
+        }
+
+        $validated = $request->validate([
+            'request_type' => 'required|in:' . implode(',', [
+                LeaveRequest::TYPE_DOCTOR_LEAVE,
+                LeaveRequest::TYPE_ANNUAL_LEAVE,
+                LeaveRequest::TYPE_EXTERNAL_DUTY,
+                LeaveRequest::TYPE_EDUCATIONAL_ASSIGNMENT,
+            ]),
+            'start_date' => 'required|date',
+            'end_date' => 'required|date|after_or_equal:start_date',
+        ]);
+
+        $previewRequest = new LeaveRequest([
+            'employee_id' => $employee->id,
+            'request_type' => $validated['request_type'],
+            'start_date' => $validated['start_date'],
+            'end_date' => $validated['end_date'],
+            'status' => LeaveRequest::STATUS_PENDING,
+        ]);
+        $previewRequest->setRelation('employee', $employee->loadMissing('user'));
+
+        $approvalBlueprints = $this->resolveApprovalBlueprints($previewRequest);
+
+        $approvals = collect($approvalBlueprints['approvals'])->map(function ($approval) {
+            $managerEmployee = $approval['manager_employee'] ?? null;
+            return [
+                'work_date' => $approval['work_date'] ?? null,
+                'manager_employee_id' => $approval['manager_employee_id'] ?? null,
+                'manager_name' => $managerEmployee?->user?->name,
+                'manager_role' => $managerEmployee?->user?->role,
+                'employee_shift_notes' => $approval['employee_shift_notes'] ?? null,
+            ];
+        })->values();
+
+        $uniqueApprovers = $approvals
+            ->filter(fn ($approval) => !empty($approval['manager_employee_id']))
+            ->unique('manager_employee_id')
+            ->values()
+            ->map(function ($approval) {
+                return [
+                    'manager_employee_id' => $approval['manager_employee_id'],
+                    'manager_name' => $approval['manager_name'],
+                    'manager_role' => $approval['manager_role'],
+                ];
+            })
+            ->values();
+
+        return response()->json([
+            'message' => 'Leave approval preview generated successfully',
+            'data' => [
+                'approvals' => $approvals,
+                'unique_approvers' => $uniqueApprovers,
+                'missing_dates' => $approvalBlueprints['missing_dates'],
+            ],
+        ]);
+    }
+
+    /**
      * Apply approved leave period to roster assignments
      */
     private function applyLeaveToSchedule(LeaveRequest $leaveRequest): int
