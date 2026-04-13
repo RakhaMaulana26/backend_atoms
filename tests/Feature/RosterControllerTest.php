@@ -202,6 +202,39 @@ class RosterControllerTest extends TestCase
     }
 
     /** @test */
+    public function it_can_return_roster_today_with_shift_periods_and_assignments()
+    {
+        $roster = RosterPeriod::factory()->create(['status' => 'published', 'month' => now()->month, 'year' => now()->year]);
+        $day = RosterDay::factory()->create(['roster_period_id' => $roster->id, 'work_date' => now()->toDateString()]);
+
+        $shift = Shift::factory()->create(['name' => 'pagi', 'start_time' => '07:00:00', 'end_time' => '13:00:00']);
+        $teamMember = Employee::factory()->create(['employee_type' => Employee::TYPE_CNS]);
+
+        ShiftAssignment::factory()->create([
+            'roster_day_id' => $day->id,
+            'employee_id' => $teamMember->id,
+            'shift_id' => $shift->id,
+        ]);
+
+        $response = $this->actingAs($this->user, 'sanctum')
+            ->getJson('/api/roster/today');
+
+        $response->assertStatus(200)
+            ->assertJsonStructure([
+                'date',
+                'shift_periods' => [
+                    '*' => ['key', 'name', 'start', 'end'],
+                ],
+                'assignments' => [
+                    '*' => ['id', 'user_id', 'shift_id', 'shift_key', 'employee_name', 'status', 'assigned_at'],
+                ],
+            ]);
+
+        $this->assertCount(3, $response->json('shift_periods'));
+        $this->assertNotEmpty($response->json('assignments'));
+    }
+
+    /** @test */
     public function it_can_add_shift_assignments_to_roster_day()
     {
         $roster = RosterPeriod::factory()->create(['status' => 'draft']);

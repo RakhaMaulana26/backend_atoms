@@ -1353,7 +1353,7 @@ GET /notifications?is_read=false&per_page=10
 ---
 
 ### 2. Mark Notification as Read
-**POST** `/notifications/{id}/read`
+**PUT** `/notifications/{id}/read`
 
 Mark a notification as read.
 
@@ -1376,7 +1376,39 @@ Authorization: Bearer {access_token}
 
 ---
 
-### 3. Create Notification
+### 3. Update Notification
+**PUT** `/notifications/{id}`
+
+Update a notification's read status.
+
+**Headers:**
+```
+Authorization: Bearer {access_token}
+```
+
+**Request Body:**
+```json
+{
+  "is_read": true
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "message": "Notification updated",
+  "data": {
+    "id": 1,
+    "is_read": true,
+    "read_at": "2026-04-04T03:59:35.000000Z",
+    "updated_at": "2026-04-04T03:59:35.000000Z"
+  }
+}
+```
+
+---
+
+### 4. Create Notification
 **POST** `/notifications/create`
 
 Create a notification with optional email.
@@ -1421,7 +1453,7 @@ Authorization: Bearer {access_token}
 
 ---
 
-### 4. Resend Notification Email
+### 5. Resend Notification Email
 **POST** `/notifications/{id}/resend-email`
 
 Resend notification email to user.
