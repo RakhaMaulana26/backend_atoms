@@ -390,6 +390,13 @@ class LeaveRequestController extends Controller
 
             $leaveRequest->load($this->getLeaveRequestRelations());
 
+            $managerEmployeeIds = $leaveRequest->approvals
+                ->pluck('manager_employee_id')
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+
             $this->notifyManagers($leaveRequest);
 
             $formattedStart = Carbon::parse($leaveRequest->start_date)->format('d M Y');
@@ -408,6 +415,7 @@ class LeaveRequestController extends Controller
                     'status' => 'pending',
                     'start_date' => Carbon::parse($leaveRequest->start_date)->format('Y-m-d'),
                     'end_date' => Carbon::parse($leaveRequest->end_date)->format('Y-m-d'),
+                    'manager_employee_ids' => $managerEmployeeIds,
                 ]),
             ]);
 
@@ -562,6 +570,13 @@ class LeaveRequestController extends Controller
             $leaveRequest->refresh()->load($this->getLeaveRequestRelations());
 
             if ($shouldNotifyEmployee) {
+                $managerEmployeeIds = $leaveRequest->approvals
+                    ->pluck('manager_employee_id')
+                    ->filter()
+                    ->unique()
+                    ->values()
+                    ->all();
+
                 Notification::create([
                     'user_id' => $leaveRequest->employee->user_id,
                     'sender_id' => Auth::id(),
@@ -575,6 +590,7 @@ class LeaveRequestController extends Controller
                         'status' => $leaveRequest->status,
                         'start_date' => Carbon::parse($leaveRequest->start_date)->format('Y-m-d'),
                         'end_date' => Carbon::parse($leaveRequest->end_date)->format('Y-m-d'),
+                        'manager_employee_ids' => $managerEmployeeIds,
                     ]),
                 ]);
 

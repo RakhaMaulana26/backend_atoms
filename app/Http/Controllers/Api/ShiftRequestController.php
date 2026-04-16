@@ -269,6 +269,18 @@ class ShiftRequestController extends Controller
             ]);
 
             $approvers = $this->persistManagerApproverIds($shiftRequest);
+            $managerEmployeeIds = array_values(array_unique(array_filter([
+                $approvers['from_manager_employee_id'] ?? null,
+                $approvers['to_manager_employee_id'] ?? null,
+            ])));
+            $managerUserIds = [];
+            if (!empty($approvers['users_by_id'])) {
+                $managerUserIds = array_values(array_unique(array_filter(array_map(
+                    fn($user) => $user?->id,
+                    $approvers['users_by_id']
+                ))));
+            }
+            $isManagerToManager = (bool) ($approvers['is_manager_to_manager'] ?? false);
 
             // Notify target employee
             $targetEmployee = Employee::findOrFail($validated['target_employee_id']);
@@ -287,6 +299,35 @@ class ShiftRequestController extends Controller
                 'message' => $detailedMessage,
                 'category' => 'shift_request',
                 'reference_id' => $shiftRequest->id,
+                'data' => json_encode([
+                    'shift_request_id' => $shiftRequest->id,
+                    'requester_employee_id' => $shiftRequest->requester_employee_id,
+                    'target_employee_id' => $shiftRequest->target_employee_id,
+                    'target_user_id' => $targetEmployee->user_id,
+                    'manager_employee_ids' => $managerEmployeeIds,
+                    'manager_user_ids' => $managerUserIds,
+                    'is_manager_to_manager' => $isManagerToManager,
+                    'status' => $shiftRequest->status,
+                ]),
+            ]);
+
+            Notification::create([
+                'user_id' => $requesterEmployee->user_id,
+                'sender_id' => Auth::id(),
+                'title' => 'Permintaan Tukar Shift Dikirim',
+                'message' => 'Permintaan tukar shift Anda telah dikirim ke ' . $targetEmployee->user->name . ' dan menunggu persetujuan.',
+                'category' => 'shift_request',
+                'reference_id' => $shiftRequest->id,
+                'data' => json_encode([
+                    'shift_request_id' => $shiftRequest->id,
+                    'requester_employee_id' => $shiftRequest->requester_employee_id,
+                    'target_employee_id' => $shiftRequest->target_employee_id,
+                    'target_user_id' => $targetEmployee->user_id,
+                    'manager_employee_ids' => $managerEmployeeIds,
+                    'manager_user_ids' => $managerUserIds,
+                    'is_manager_to_manager' => $isManagerToManager,
+                    'status' => $shiftRequest->status,
+                ]),
             ]);
 
             Log::info('[shift_request][notify] Target notification created', [
@@ -388,6 +429,17 @@ class ShiftRequestController extends Controller
                 'reference_id' => $shiftRequest->id,
             ]);
 
+            Notification::create([
+                'user_id' => $shiftRequest->targetEmployee->user_id,
+                'sender_id' => Auth::id(),
+                'title' => $isCompleted ? 'Tukar Shift Selesai' : 'Persetujuan Tukar Shift Tercatat',
+                'message' => $isCompleted
+                    ? 'Persetujuan Anda sudah tercatat dan pertukaran shift telah berhasil dieksekusi.'
+                    : 'Persetujuan Anda sudah tercatat dan menunggu persetujuan dari pihak lainnya.',
+                'category' => 'shift_request',
+                'reference_id' => $shiftRequest->id,
+            ]);
+
             ActivityLog::create([
                 'user_id' => Auth::id(),
                 'action' => 'approve_target',
@@ -468,6 +520,26 @@ class ShiftRequestController extends Controller
                 }
 
                 $isCompleted = $shiftRequest->status === ShiftRequest::STATUS_COMPLETED;
+
+                Notification::create([
+                    'user_id' => $shiftRequest->requesterEmployee->user_id,
+                    'sender_id' => Auth::id(),
+                    'title' => $isCompleted ? 'Tukar Shift Selesai' : 'Tukar Shift Disetujui',
+                    'message' => 'General Manager telah menyetujui permintaan tukar shift Anda.'
+                        . ($isCompleted ? ' Pertukaran shift sudah dieksekusi.' : ' Menunggu persetujuan target manager.'),
+                    'category' => 'shift_request',
+                    'reference_id' => $shiftRequest->id,
+                ]);
+
+                Notification::create([
+                    'user_id' => $shiftRequest->targetEmployee->user_id,
+                    'sender_id' => Auth::id(),
+                    'title' => $isCompleted ? 'Tukar Shift Selesai' : 'Persetujuan Tukar Shift Tercatat',
+                    'message' => 'General Manager telah menyetujui permintaan tukar shift terkait Anda.'
+                        . ($isCompleted ? ' Pertukaran shift sudah dieksekusi.' : ' Menunggu persetujuan target manager.'),
+                    'category' => 'shift_request',
+                    'reference_id' => $shiftRequest->id,
+                ]);
 
                 ActivityLog::create([
                     'user_id' => Auth::id(),
@@ -553,6 +625,26 @@ class ShiftRequestController extends Controller
             }
 
             $isCompleted = $shiftRequest->status === ShiftRequest::STATUS_COMPLETED;
+
+            Notification::create([
+                'user_id' => $shiftRequest->requesterEmployee->user_id,
+                'sender_id' => Auth::id(),
+                'title' => $isCompleted ? 'Tukar Shift Selesai' : 'Tukar Shift Disetujui',
+                'message' => Auth::user()->name . ' telah menyetujui permintaan tukar shift Anda.'
+                    . ($isCompleted ? ' Pertukaran shift sudah dieksekusi.' : ' Menunggu persetujuan dari pihak lainnya.'),
+                'category' => 'shift_request',
+                'reference_id' => $shiftRequest->id,
+            ]);
+
+            Notification::create([
+                'user_id' => $shiftRequest->targetEmployee->user_id,
+                'sender_id' => Auth::id(),
+                'title' => $isCompleted ? 'Tukar Shift Selesai' : 'Persetujuan Tukar Shift Tercatat',
+                'message' => Auth::user()->name . ' telah menyetujui permintaan tukar shift terkait Anda.'
+                    . ($isCompleted ? ' Pertukaran shift sudah dieksekusi.' : ' Menunggu persetujuan dari pihak lainnya.'),
+                'category' => 'shift_request',
+                'reference_id' => $shiftRequest->id,
+            ]);
 
             ActivityLog::create([
                 'user_id' => Auth::id(),
@@ -642,17 +734,16 @@ class ShiftRequestController extends Controller
                 'reference_id' => $shiftRequest->id,
             ]);
 
-            // If rejected by manager, also notify target
-            if ($shiftRequest->target_employee_id !== $employee->id) {
-                Notification::create([
-                    'user_id' => $shiftRequest->targetEmployee->user_id,
-                    'sender_id' => Auth::id(),
-                    'title' => 'Tukar Shift Ditolak',
-                    'message' => 'Permintaan tukar shift dengan ' . $shiftRequest->requesterEmployee->user->name . ' ditolak oleh manager',
-                    'category' => 'shift_request',
-                    'reference_id' => $shiftRequest->id,
-                ]);
-            }
+            Notification::create([
+                'user_id' => $shiftRequest->targetEmployee->user_id,
+                'sender_id' => Auth::id(),
+                'title' => $shiftRequest->target_employee_id === $employee->id ? 'Permintaan Ditolak' : 'Tukar Shift Ditolak',
+                'message' => $shiftRequest->target_employee_id === $employee->id
+                    ? 'Anda menolak permintaan tukar shift dengan ' . $shiftRequest->requesterEmployee->user->name . '.' . ($request->reason ? ' Alasan: ' . $request->reason : '')
+                    : 'Permintaan tukar shift dengan ' . $shiftRequest->requesterEmployee->user->name . ' ditolak oleh ' . $rejecterName,
+                'category' => 'shift_request',
+                'reference_id' => $shiftRequest->id,
+            ]);
 
             ActivityLog::create([
                 'user_id' => Auth::id(),
@@ -710,6 +801,15 @@ class ShiftRequestController extends Controller
                 'sender_id' => Auth::id(),
                 'title' => 'Permintaan Dibatalkan',
                 'message' => Auth::user()->name . ' membatalkan permintaan tukar shift',
+                'category' => 'shift_request',
+                'reference_id' => $shiftRequest->id,
+            ]);
+
+            Notification::create([
+                'user_id' => $shiftRequest->requesterEmployee->user_id,
+                'sender_id' => Auth::id(),
+                'title' => 'Permintaan Dibatalkan',
+                'message' => 'Permintaan tukar shift Anda telah dibatalkan.',
                 'category' => 'shift_request',
                 'reference_id' => $shiftRequest->id,
             ]);
@@ -786,6 +886,127 @@ class ShiftRequestController extends Controller
 
         $collapsed = preg_replace('/\s+/', ' ', trim($role));
         return mb_strtolower($collapsed ?? '');
+    }
+
+    /**
+     * Resolve General Manager for a roster day + shift context.
+     * Used when requester is Manager Teknik so approval context is GM.
+     */
+    private function resolveGeneralManagerForShiftContext(int $rosterDayId, string $notes, ?int $groupNumber = null): ?array
+    {
+        $normalizedNotes = strtolower(trim($notes));
+
+        // Priority 1: temporary duty (manager_duties) tied to shift assignment notes
+        $gmDutyByAssignment = ManagerDuty::query()
+            ->where('roster_day_id', $rosterDayId)
+            ->with(['employee.user'])
+            ->whereHas('employee', function ($employeeQuery) {
+                $employeeQuery->whereHas('user', function ($userQuery) {
+                    $userQuery->where('role', User::ROLE_GENERAL_MANAGER);
+                });
+            })
+            ->whereHas('employee.shiftAssignments', function ($shiftAssignmentQuery) use ($rosterDayId, $normalizedNotes) {
+                $shiftAssignmentQuery->where('roster_day_id', $rosterDayId)
+                    ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes]);
+            })
+            ->when($groupNumber !== null, function ($q) use ($groupNumber) {
+                $q->whereHas('employee', function ($employeeQuery) use ($groupNumber) {
+                    $employeeQuery->where('group_number', $groupNumber);
+                });
+            })
+            ->first();
+
+        if (!$gmDutyByAssignment) {
+            $gmDutyByAssignment = ManagerDuty::query()
+                ->where('roster_day_id', $rosterDayId)
+                ->with(['employee.user'])
+                ->whereHas('employee', function ($employeeQuery) {
+                    $employeeQuery->whereHas('user', function ($userQuery) {
+                        $userQuery->where('role', User::ROLE_GENERAL_MANAGER);
+                    });
+                })
+                ->whereHas('employee.shiftAssignments', function ($shiftAssignmentQuery) use ($rosterDayId, $normalizedNotes) {
+                    $shiftAssignmentQuery->where('roster_day_id', $rosterDayId)
+                        ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes]);
+                })
+                ->first();
+        }
+
+        if ($gmDutyByAssignment && $gmDutyByAssignment->employee && $gmDutyByAssignment->employee->user) {
+            return [
+                'employee_id' => $gmDutyByAssignment->employee_id,
+                'user_id' => $gmDutyByAssignment->employee->user_id,
+                'name' => $gmDutyByAssignment->employee->user->name,
+                'notes' => $notes,
+                'is_temporary' => true,
+                'employee_type' => User::ROLE_GENERAL_MANAGER,
+                'group_number' => $gmDutyByAssignment->employee->group_number,
+            ];
+        }
+
+        // Priority 2: fixed GM from shift assignments (same group first, then any group)
+        $gmShiftAssignment = ShiftAssignment::query()
+            ->where('roster_day_id', $rosterDayId)
+            ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes])
+            ->with(['employee.user'])
+            ->whereHas('employee', function ($employeeQuery) {
+                $employeeQuery->whereHas('user', function ($userQuery) {
+                    $userQuery->where('role', User::ROLE_GENERAL_MANAGER);
+                });
+            })
+            ->when($groupNumber !== null, function ($q) use ($groupNumber) {
+                $q->whereHas('employee', function ($employeeQuery) use ($groupNumber) {
+                    $employeeQuery->where('group_number', $groupNumber);
+                });
+            })
+            ->first();
+
+        if (!$gmShiftAssignment) {
+            $gmShiftAssignment = ShiftAssignment::query()
+                ->where('roster_day_id', $rosterDayId)
+                ->whereRaw('LOWER(TRIM(notes)) = ?', [$normalizedNotes])
+                ->with(['employee.user'])
+                ->whereHas('employee', function ($employeeQuery) {
+                    $employeeQuery->whereHas('user', function ($userQuery) {
+                        $userQuery->where('role', User::ROLE_GENERAL_MANAGER);
+                    });
+                })
+                ->first();
+        }
+
+        if ($gmShiftAssignment && $gmShiftAssignment->employee && $gmShiftAssignment->employee->user) {
+            return [
+                'employee_id' => $gmShiftAssignment->employee_id,
+                'user_id' => $gmShiftAssignment->employee->user_id,
+                'name' => $gmShiftAssignment->employee->user->name,
+                'notes' => $gmShiftAssignment->notes,
+                'is_temporary' => false,
+                'employee_type' => User::ROLE_GENERAL_MANAGER,
+                'group_number' => $gmShiftAssignment->employee->group_number,
+            ];
+        }
+
+        // Priority 3: fallback to any active General Manager identity
+        $generalManager = Employee::query()
+            ->with('user')
+            ->whereHas('user', function ($q) {
+                $q->where('role', User::ROLE_GENERAL_MANAGER);
+            })
+            ->first();
+
+        if ($generalManager && $generalManager->user) {
+            return [
+                'employee_id' => $generalManager->id,
+                'user_id' => $generalManager->user_id,
+                'name' => $generalManager->user->name,
+                'notes' => $notes,
+                'is_temporary' => false,
+                'employee_type' => User::ROLE_GENERAL_MANAGER,
+                'group_number' => $generalManager->group_number,
+            ];
+        }
+
+        return null;
     }
 
     /**
@@ -1704,6 +1925,26 @@ class ShiftRequestController extends Controller
             'shift_id' => $shiftId,
             'user_group' => $userGroupNumber,
         ]);
+
+        // Special case: when requester is Manager Teknik, show/route manager context as General Manager.
+        $isRequesterManagerTeknik = $this->normalizeRole($authUser->role) === $this->normalizeRole(User::ROLE_MANAGER_TEKNIK);
+        if ($isRequesterManagerTeknik) {
+            $generalManager = $this->resolveGeneralManagerForShiftContext($rosterDayId, $notes, $userGroupNumber);
+
+            if ($generalManager) {
+                \Log::info('[getManagerForShift] Using General Manager context for Manager Teknik requester', [
+                    'roster_day_id' => $rosterDayId,
+                    'notes' => $notes,
+                    'requester_user_id' => $authUser->id,
+                    'general_manager_user_id' => $generalManager['user_id'] ?? null,
+                    'general_manager_name' => $generalManager['name'] ?? null,
+                ]);
+
+                return response()->json([
+                    'data' => $generalManager,
+                ]);
+            }
+        }
 
         // Priority 1: Check temporary manager from manager_duties.
         // Some imported rosters have manager_duties.shift_id that does not match the actual daily shift,

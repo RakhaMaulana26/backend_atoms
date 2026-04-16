@@ -1511,8 +1511,8 @@ class RosterController extends Controller
     }
 
     /**
-     * GET /api/roster/auto-assignment?date=YYYY-MM-DD&shift=07-13|13-19|19-07
-     * Return array of user objects {id, name, role} available for assignment
+    * GET /api/roster/auto-assignment?date=YYYY-MM-DD&shift=07-13|13-19|19-07
+    * Return array of user objects {id, name, role} that are on duty for selected date+shift.
      */
     public function autoAssignment(Request $request)
     {
@@ -1545,34 +1545,23 @@ class RosterController extends Controller
         // Find roster day for the date
         $rosterDay = RosterDay::whereDate('work_date', $date)->first();
         if (!$rosterDay) {
-            // If no roster day, return all active employees
-            $employees = Employee::with('user:id,name,role')
-                ->where('is_active', true)
-                ->whereNotNull('group_number')
-                ->where('group_number', '>', 0)
-                ->get()
-                ->map(function ($employee) {
-                    return [
-                        'id' => $employee->user->id,
-                        'name' => $employee->user->name,
-                        'role' => $employee->user->role,
-                    ];
-                });
-            return response()->json(['data' => $employees]);
+            // No roster day means there is no duty assignment yet.
+            return response()->json(['data' => []]);
         }
 
-        // Get assigned employee IDs for this shift on this day
+        // Get employee IDs that are assigned for this shift on this day.
         $assignedEmployeeIds = ShiftAssignment::where('roster_day_id', $rosterDay->id)
             ->where('shift_id', $shift->id)
             ->pluck('employee_id')
             ->toArray();
 
-        // Get available employees (not assigned to this shift)
-        $availableEmployees = Employee::with('user:id,name,role')
+        if (empty($assignedEmployeeIds)) {
+            return response()->json(['data' => []]);
+        }
+
+        $onDutyEmployees = Employee::with('user:id,name,role')
             ->where('is_active', true)
-            ->whereNotNull('group_number')
-            ->where('group_number', '>', 0)
-            ->whereNotIn('id', $assignedEmployeeIds)
+            ->whereIn('id', $assignedEmployeeIds)
             ->get()
             ->map(function ($employee) {
                 return [
@@ -1580,9 +1569,10 @@ class RosterController extends Controller
                     'name' => $employee->user->name,
                     'role' => $employee->user->role,
                 ];
-            });
+            })
+            ->values();
 
-        return response()->json(['data' => $availableEmployees]);
+        return response()->json(['data' => $onDutyEmployees]);
     }
 
     /**
