@@ -365,6 +365,16 @@ class LeaveRequestController extends Controller
                 ], 422);
             }
 
+            if (empty($approvalBlueprints['approvals']) && !empty($approvalBlueprints['off_dates'])) {
+                DB::rollBack();
+                return response()->json([
+                    'message' => 'Semua tanggal yang dipilih adalah hari libur, sehingga tidak perlu mengajukan cuti.',
+                    'errors' => [
+                        'off_dates' => $approvalBlueprints['off_dates'],
+                    ],
+                ], 422);
+            }
+
             foreach ($approvalBlueprints['approvals'] as $approvalData) {
                 LeaveRequestApproval::create([
                     'leave_request_id' => $leaveRequest->id,
@@ -792,6 +802,7 @@ class LeaveRequestController extends Controller
                 'approvals' => $approvals,
                 'unique_approvers' => $uniqueApprovers,
                 'missing_dates' => $approvalBlueprints['missing_dates'],
+                'off_dates' => $approvalBlueprints['off_dates'] ?? [],
             ],
         ]);
     }
@@ -891,10 +902,17 @@ class LeaveRequestController extends Controller
 
         $approvalBlueprints = [];
         $missingDates = [];
+        $offDates = [];
 
         foreach (CarbonPeriod::create($leaveRequest->start_date, $leaveRequest->end_date) as $date) {
             $workDate = $date->format('Y-m-d');
             $resolution = $this->resolveManagerAssignmentForDate($leaveRequest, $workDate);
+
+            if (!empty($resolution['is_off_day'])) {
+                $offDates[] = $resolution['message']
+                    ?? ('Tanggal ' . Carbon::parse($workDate)->format('d M Y') . ' adalah libur, tidak memerlukan persetujuan.');
+                continue;
+            }
 
             if (!$resolution['manager_employee']) {
                 $missingDates[] = $resolution['message'];
@@ -913,6 +931,7 @@ class LeaveRequestController extends Controller
         return [
             'approvals' => $approvalBlueprints,
             'missing_dates' => $missingDates,
+            'off_dates' => $offDates,
         ];
     }
 
@@ -942,6 +961,16 @@ class LeaveRequestController extends Controller
             ->first();
 
         $employeeShiftNotes = trim((string) ($employeeAssignment?->notes ?? ''));
+
+        if (!$employeeAssignment || $employeeAssignment->isDayOff()) {
+            return [
+                'roster_day' => $publishedRosterDay,
+                'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
+                'manager_employee' => null,
+                'message' => 'Tanggal ' . Carbon::parse($workDate)->format('d M Y') . ' adalah libur, tidak memerlukan persetujuan.',
+                'is_off_day' => true,
+            ];
+        }
         $managerEmployee = null;
 
         // If the requester is a manager, approval must go to General Manager.
@@ -963,6 +992,7 @@ class LeaveRequestController extends Controller
                         'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
                         'manager_employee' => $generalManagerEmployee,
                         'message' => null,
+                        'is_off_day' => false,
                     ];
                 }
             }
@@ -972,6 +1002,7 @@ class LeaveRequestController extends Controller
                 'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
                 'manager_employee' => null,
                 'message' => 'General Manager tidak ditemukan untuk approval cuti manager.',
+                'is_off_day' => false,
             ];
         }
 
@@ -1017,6 +1048,7 @@ class LeaveRequestController extends Controller
                 'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
                 'manager_employee' => null,
                 'message' => 'Tanggal ' . Carbon::parse($workDate)->format('d M Y') . ': ' . $reason . '.',
+                'is_off_day' => false,
             ];
         }
 
@@ -1025,6 +1057,7 @@ class LeaveRequestController extends Controller
             'employee_shift_notes' => $employeeShiftNotes !== '' ? $employeeShiftNotes : null,
             'manager_employee' => $managerEmployee,
             'message' => null,
+            'is_off_day' => false,
         ];
     }
 
