@@ -1,2 +1,21 @@
 [php]
-extensions = ["gd"]
+extensions = [
+  "gd",
+  "bcmath",
+  "ctype",
+  "curl",
+  "dom",
+  "exif",
+  "fileinfo",
+  "intl",
+  "mbstring",
+  "opcache",
+  "pcntl",
+  "pdo",
+  "pdo_mysql",
+  "redis",
+  "tokenizer",
+  "xml",
+  "xmlwriter",
+  "zip"
+]
