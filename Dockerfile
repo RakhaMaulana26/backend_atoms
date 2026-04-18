@@ -44,4 +44,6 @@ RUN sed -ri -e 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-avail
 
 EXPOSE 80
 
-CMD ["apache2-foreground"]
+RUN chmod +x /var/www/html/docker-entrypoint.sh
+
+CMD ["/var/www/html/docker-entrypoint.sh"]
