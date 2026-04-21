@@ -4,6 +4,8 @@ namespace App\Observers;
 
 use App\Models\Notification;
 use App\Helpers\CacheHelper;
+use App\Services\NotificationService;
+use Illuminate\Support\Facades\Log;
 
 class NotificationObserver
 {
@@ -13,6 +15,38 @@ class NotificationObserver
     public function created(Notification $notification): void
     {
         CacheHelper::clearNotificationCache($notification->user_id);
+
+        if ($notification->type === 'sent') {
+            return;
+        }
+
+        if ($notification->email_sent) {
+            return;
+        }
+
+        $user = $notification->user;
+        if (!$user || !$user->email) {
+            return;
+        }
+
+        $sendEmail = true;
+        if (is_array($notification->data) && array_key_exists('send_email', $notification->data)) {
+            $sendEmail = (bool) $notification->data['send_email'];
+        }
+
+        if (!$sendEmail) {
+            return;
+        }
+
+        try {
+            $service = app(NotificationService::class);
+            $service->resendEmail($notification);
+        } catch (\Exception $e) {
+            Log::error('Failed to send notification email from observer', [
+                'notification_id' => $notification->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

@@ -372,6 +372,8 @@ class NotificationController extends Controller
         $request->validate([
             'user_ids' => 'sometimes|array',
             'user_ids.*' => 'integer|exists:users,id',
+            'emails' => 'sometimes|array',
+            'emails.*' => 'email',
             'roles' => 'sometimes|array',
             'roles.*' => 'string',
             'title' => 'required|string|max:255',
@@ -382,6 +384,7 @@ class NotificationController extends Controller
         $sender = Auth::user();
 
         $requestedUserIds = $request->input('user_ids', []);
+        $requestedEmails = $request->input('emails', []);
         $requestedRoles = $request->input('roles', []);
 
         $validRoles = array_keys(User::getRoles());
@@ -394,9 +397,9 @@ class NotificationController extends Controller
             }
         }
 
-        if (empty($requestedUserIds) && empty($requestedRoles)) {
+        if (empty($requestedUserIds) && empty($requestedRoles) && empty($requestedEmails)) {
             return response()->json([
-                'message' => 'You must provide user_ids or roles.'
+                'message' => 'You must provide user_ids, emails, or roles.'
             ], 422);
         }
 
@@ -408,12 +411,17 @@ class NotificationController extends Controller
 
         $userIds = collect($requestedUserIds)->filter()->unique()->toArray();
 
+        if (!empty($requestedEmails)) {
+            $emailUserIds = User::whereIn('email', $requestedEmails)->pluck('id')->toArray();
+            $userIds = array_unique(array_merge($userIds, $emailUserIds));
+        }
+
         if (!empty($requestedRoles)) {
             $roleUserIds = User::whereIn('role', $requestedRoles)->pluck('id')->toArray();
             $userIds = array_unique(array_merge($userIds, $roleUserIds));
         }
 
-        $sendEmail = $request->get('send_email', false);
+        $sendEmail = $request->get('send_email', true);
         $notifications = [];
 
         foreach ($userIds as $userId) {
@@ -429,11 +437,10 @@ class NotificationController extends Controller
                 'message' => $request->message,
                 'type' => 'inbox',
                 'is_read' => false,
+                'data' => [
+                    'send_email' => $sendEmail,
+                ],
             ]);
-
-            if ($sendEmail) {
-                $this->notificationService->resendEmail($inboxNotification);
-            }
 
             // Keep a record for sender's sent view
             Notification::create([
@@ -451,9 +458,14 @@ class NotificationController extends Controller
 
         CacheHelper::clearNotificationCache($sender->id);
 
+        $resolvedRecipients = User::whereIn('id', $userIds)
+            ->get(['id', 'name', 'email'])
+            ->toArray();
+
         return response()->json([
             'message' => 'Notification sent successfully',
             'data' => $notifications,
+            'recipients' => $resolvedRecipients,
         ], 201);
     }
 

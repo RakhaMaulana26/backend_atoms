@@ -78,18 +78,9 @@ class SendScheduledNotificationJob implements ShouldQueue
                         'data' => [
                             'original_scheduled_id' => $notification->id,
                             'sent_at' => now()->toISOString(),
+                            'send_email' => (bool) ($notification->data['send_email'] ?? true),
                         ]
                     ]);
-
-                    // Send email if requested
-                    if ($notification->data && isset($notification->data['send_email']) && $notification->data['send_email']) {
-                        try {
-                            $notificationService->sendEmail($user, $notification->title, $notification->message);
-                            Log::info("Email sent to user {$user->email} for notification {$notification->id}");
-                        } catch (\Exception $emailException) {
-                            Log::error("Failed to send email to user {$user->email}: " . $emailException->getMessage());
-                        }
-                    }
 
                     $sentCount++;
 

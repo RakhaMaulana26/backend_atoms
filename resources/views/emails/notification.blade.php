@@ -76,7 +76,7 @@
             
             <div class="message">
                 <h2 style="margin-top: 0; color: #454D7C;">{{ $title }}</h2>
-                <p style="margin: 0;">{{ $message }}</p>
+                <p style="margin: 0;">{{ $bodyMessage }}</p>
             </div>
             
             <p style="color: #666; font-size: 14px;">

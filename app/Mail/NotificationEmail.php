@@ -32,7 +32,7 @@ class NotificationEmail extends Mailable
                     ->view('emails.notification')
                     ->with([
                         'title' => $this->notification->title,
-                        'message' => $this->notification->message,
+                        'bodyMessage' => $this->notification->message,
                         'userName' => $this->userName,
                         'createdAt' => $this->notification->created_at->format('d M Y, H:i'),
                     ]);

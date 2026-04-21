@@ -25,32 +25,10 @@ class NotificationService
             'title' => $title,
             'message' => $message,
             'is_read' => false,
+            'data' => [
+                'send_email' => $sendEmail,
+            ],
         ]);
-
-        // Send email if enabled
-        if ($sendEmail && $user->email) {
-            try {
-                Mail::to($user->email)->send(
-                    new NotificationEmail($notification, $user->name)
-                );
-                
-                $notification->update([
-                    'email_sent' => true,
-                    'email_sent_at' => now(),
-                ]);
-                
-                Log::info("Notification email sent to {$user->email}", [
-                    'notification_id' => $notification->id,
-                    'user_id' => $user->id,
-                ]);
-            } catch (\Exception $e) {
-                Log::error("Failed to send notification email to {$user->email}", [
-                    'notification_id' => $notification->id,
-                    'user_id' => $user->id,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
 
         return $notification;
     }
