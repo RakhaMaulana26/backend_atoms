@@ -10,10 +10,14 @@ use App\Http\Requests\QuickUpdateAssignmentRequest;
 use App\Models\ActivityLog;
 use App\Models\Employee;
 use App\Models\ManagerDuty;
+use App\Models\LeaveRequest;
+use App\Models\LeaveRequestApproval;
+use App\Models\Notification;
 use App\Models\RosterDay;
 use App\Models\RosterPeriod;
 use App\Models\Shift;
 use App\Models\ShiftAssignment;
+use App\Models\ShiftRequest;
 use App\Models\RosterTask;
 use App\Helpers\CacheHelper;
 use Carbon\Carbon;
@@ -1245,6 +1249,42 @@ class RosterController extends Controller
         DB::beginTransaction();
         try {
             $monthYear = $rosterPeriod->month . '/' . $rosterPeriod->year;
+
+            $rosterDayIds = RosterDay::where('roster_period_id', $id)->pluck('id');
+
+            // Identify swap requests tied to this roster period through roster day references.
+            $shiftRequestIds = ShiftRequest::withTrashed()
+                ->where(function ($query) use ($rosterDayIds) {
+                    $query->whereIn('from_roster_day_id', $rosterDayIds)
+                        ->orWhereIn('to_roster_day_id', $rosterDayIds);
+                })
+                ->pluck('id')
+                ->unique();
+
+            // Identify leave requests that have approval dates on this roster period.
+            $leaveRequestIds = LeaveRequestApproval::whereIn('roster_day_id', $rosterDayIds)
+                ->pluck('leave_request_id')
+                ->unique();
+
+            if ($shiftRequestIds->isNotEmpty()) {
+                Notification::where('category', 'shift_request')
+                    ->whereIn('reference_id', $shiftRequestIds)
+                    ->delete();
+
+                ShiftRequest::withTrashed()
+                    ->whereIn('id', $shiftRequestIds)
+                    ->forceDelete();
+            }
+
+            if ($leaveRequestIds->isNotEmpty()) {
+                Notification::where('category', 'leave_request')
+                    ->whereIn('reference_id', $leaveRequestIds)
+                    ->delete();
+
+                LeaveRequest::withTrashed()
+                    ->whereIn('id', $leaveRequestIds)
+                    ->forceDelete();
+            }
 
             // Delete all related data (cascading should handle this, but let's be explicit)
             // Delete shift assignments for all roster days

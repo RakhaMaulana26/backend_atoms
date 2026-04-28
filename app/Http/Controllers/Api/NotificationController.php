@@ -67,6 +67,12 @@ class NotificationController extends Controller
     public function all(Request $request)
     {
         $user = Auth::user();
+        $page = max((int) $request->get('page', 1), 1);
+        $perPage = (int) $request->get('per_page', 20);
+        if ($perPage <= 0) {
+            $perPage = 20;
+        }
+        $perPage = min($perPage, 100);
         
         // Get all user's notifications (both received and sent, including trashed)
         $allNotifications = Notification::with('sender:id,name,email')
@@ -79,34 +85,40 @@ class NotificationController extends Controller
             ->get();
 
         // Categorize notifications
-        $inbox = $allNotifications->filter(function($n) use ($user) {
+        $inboxCollection = $allNotifications->filter(function($n) use ($user) {
             return $n->user_id === $user->id 
                 && ($n->type === 'inbox' || $n->category === 'roster') 
                 && $n->deleted_at === null;
         })->values();
 
-        $roster = $allNotifications->filter(function($n) use ($user) {
+        $rosterCollection = $allNotifications->filter(function($n) use ($user) {
             return $n->user_id === $user->id 
                 && $n->category === 'roster' 
                 && $n->deleted_at === null;
         })->values();
 
-        $starred = $allNotifications->filter(function($n) {
+        $starredCollection = $allNotifications->filter(function($n) {
             return $n->is_starred && $n->deleted_at === null;
         })->values();
 
-        $sent = $allNotifications->filter(function($n) use ($user) {
+        $sentCollection = $allNotifications->filter(function($n) use ($user) {
             return $n->sender_id === $user->id 
                 && $n->type === 'sent' 
                 && $n->deleted_at === null;
         })->values();
 
-        $trash = $allNotifications->filter(function($n) {
+        $trashCollection = $allNotifications->filter(function($n) {
             return $n->deleted_at !== null;
         })->values();
 
+        $inbox = $inboxCollection->forPage($page, $perPage)->values();
+        $roster = $rosterCollection->forPage($page, $perPage)->values();
+        $starred = $starredCollection->forPage($page, $perPage)->values();
+        $sent = $sentCollection->forPage($page, $perPage)->values();
+        $trash = $trashCollection->forPage($page, $perPage)->values();
+
         // Count unread for badge
-        $unreadInbox = $inbox->where('is_read', false)->count();
+        $unreadInbox = $inboxCollection->where('is_read', false)->count();
 
         return response()->json([
             'data' => [
@@ -117,12 +129,21 @@ class NotificationController extends Controller
                 'trash' => $trash,
             ],
             'stats' => [
-                'inbox' => $inbox->count(),
-                'roster' => $roster->count(),
-                'starred' => $starred->count(),
-                'sent' => $sent->count(),
-                'trash' => $trash->count(),
+                'inbox' => $inboxCollection->count(),
+                'roster' => $rosterCollection->count(),
+                'starred' => $starredCollection->count(),
+                'sent' => $sentCollection->count(),
+                'trash' => $trashCollection->count(),
                 'unread' => $unreadInbox,
+            ],
+            'pagination' => [
+                'page' => $page,
+                'per_page' => $perPage,
+                'inbox_total' => $inboxCollection->count(),
+                'roster_total' => $rosterCollection->count(),
+                'starred_total' => $starredCollection->count(),
+                'sent_total' => $sentCollection->count(),
+                'trash_total' => $trashCollection->count(),
             ],
         ]);
     }
